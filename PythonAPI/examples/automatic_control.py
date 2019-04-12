@@ -90,6 +90,7 @@ import carla
 from carla import ColorConverter as cc
 from agents.navigation.roaming_agent import RoamingAgent
 from agents.navigation.basic_agent import BasicAgent
+from agents.navigation.gut_agent import GUTAgent
 
 
 # ==============================================================================
@@ -749,6 +750,8 @@ def game_loop(args):
 
         if args.agent == "Roaming":
             agent = RoamingAgent(world.player)
+        if args.agent == "GUT":
+            agent = GUTAgent(world.player)
         else:
             agent = BasicAgent(world.player)
             spawn_point = world.map.get_spawn_points()[0]
@@ -826,7 +829,7 @@ def main():
         default='vehicle.*',
         help='actor filter (default: "vehicle.*")')
     argparser.add_argument("-a", "--agent", type=str,
-                           choices=["Roaming", "Basic"],
+                           choices=["Roaming", "Basic", 'GUT'],
                            help="select which agent to run",
                            default="Basic")
     args = argparser.parse_args()
