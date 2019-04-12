@@ -633,7 +633,7 @@ class CameraManager(object):
         self.hud = hud
         self.recording = False
         self._camera_transforms = [
-            carla.Transform(carla.Location(x=-5.5, z=2.8), carla.Rotation(pitch=-15)),
+            carla.Transform(carla.Location(x=-10.5, z=5.8), carla.Rotation(pitch=-20)),
             carla.Transform(carla.Location(x=1.6, z=1.7))]
         self.transform_index = 1
         self.sensors = [

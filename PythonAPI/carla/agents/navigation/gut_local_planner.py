@@ -18,6 +18,7 @@ import math
 from typing import List
 from agents.navigation.controller import VehiclePIDController
 from agents.tools.misc import distance_vehicle, draw_waypoints, compute_magnitude_angle
+import itertools
 
 class RoadOption(Enum):
     """
@@ -277,7 +278,16 @@ class LocalPlanner(object):
 
         if debug:
             #draw_waypoints(self._vehicle.get_world(), [self._target_waypoint], self._vehicle.get_location().z + 1.0, color=carla.Color(0, 255, 0))
-            draw_waypoints(self._vehicle.get_world(), [reference_waypoint], veh_location.z + 1.0)
+            #draw_waypoints(self._vehicle.get_world(), [reference_waypoint], veh_location.z + 1.0)
+
+            # Nearest waypoints with relative coordinates (input for waypoint generator model)
+            short_plan = itertools.islice(local_plan, 0, 6)
+            for wp in short_plan:
+                x = wp.transform.location.x
+                y = wp.transform.location.y
+                print('Waypoint ({:.2f}, {:.2f}), Veh: ({:.2f}, {:.2f}), Relative: {}'.format(x,y, veh_location.x, veh_location.y, wp.transform.location - veh_location))
+            draw_waypoints(self._vehicle.get_world(), itertools.islice(local_plan, 0, 6), veh_location.z + 1.0)
+            pass
 
         return control
 
