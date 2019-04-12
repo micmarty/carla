@@ -83,6 +83,9 @@ try:
 except IndexError:
     pass
 
+# Add agent module
+sys.path.append(glob.glob('../carla')[0])
+
 import carla
 from carla import ColorConverter as cc
 from agents.navigation.roaming_agent import RoamingAgent
@@ -736,6 +739,12 @@ def game_loop(args):
 
         hud = HUD(args.width, args.height)
         world = World(client.get_world(), hud, args.filter)
+        if args.synchronous_mode:
+            print('enabling synchronous mode.')
+            settings = world.world.get_settings()
+            settings.synchronous_mode = True
+            world.world.apply_settings(settings)
+
         controller = KeyboardControl(world, False)
 
         if args.agent == "Roaming":
@@ -749,10 +758,13 @@ def game_loop(args):
 
         clock = pygame.time.Clock()
         while True:
-            if controller.parse_events(client, world, clock):
-                return
+            # This was disrupting control computed by agent (vehicle stood in place)
+            # if controller.parse_events(client, world, clock):
+            #     return
 
             # as soon as the server is ready continue!
+            if args.synchronous_mode:
+                world.world.tick()
             if not world.world.wait_for_tick(10.0):
                 continue
 
@@ -765,8 +777,12 @@ def game_loop(args):
 
     finally:
         if world is not None:
+            if args.synchronous_mode:
+                print('\ndisabling synchronous mode.')
+                settings = world.world.get_settings()
+                settings.synchronous_mode = False
+                world.world.apply_settings(settings)
             world.destroy()
-
         pygame.quit()
 
 
@@ -783,6 +799,11 @@ def main():
         action='store_true',
         dest='debug',
         help='print debug information')
+    argparser.add_argument(
+        '-s', '--sync',
+        action='store_true',
+        dest='synchronous_mode',
+        help='turn on synchronous mode')
     argparser.add_argument(
         '--host',
         metavar='H',
