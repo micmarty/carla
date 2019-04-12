@@ -1,0 +1,8 @@
+1. Copy dist folder with egg
+cp EGG_PATH/dist PythonAPI/carla
+
+2. Install deps
+conda install -c anaconda libpng
+pip install -r PythonAPI/examples/requirements
+
+
