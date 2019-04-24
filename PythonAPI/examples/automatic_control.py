@@ -840,8 +840,8 @@ def main():
     argparser.add_argument(
         '--filter',
         metavar='PATTERN',
-        default='vehicle.*',
-        help='actor filter (default: "vehicle.*")')
+        default='vehicle.lincoln.*',
+        help='actor filter (default: "vehicle.lincoln.*")')
     argparser.add_argument("-a", "--agent", type=str,
                            choices=["Roaming", "Basic", 'GUT'],
                            help="select which agent to run",
