@@ -749,6 +749,7 @@ def game_loop(args):
             settings.synchronous_mode = True
             world.world.apply_settings(settings)
 
+
         controller = KeyboardControl(world, False)
 
         if args.agent == "Roaming":
@@ -761,6 +762,10 @@ def game_loop(args):
             agent.set_destination((spawn_point.location.x,
                                    spawn_point.location.y,
                                    spawn_point.location.z))
+        if args.record_spline:
+            print('enabling waypoint and images recording')
+            world.camera_manager.recording = True
+            agent.recording = True
 
         clock = pygame.time.Clock()
         while True:
@@ -771,13 +776,14 @@ def game_loop(args):
             # as soon as the server is ready continue!
             if args.synchronous_mode:
                 world.world.tick()
-            if not world.world.wait_for_tick(10.0):
+            timestamp = world.world.wait_for_tick(10.0)
+            if not timestamp:
                 continue
 
             world.tick(clock)
             world.render(display)
             pygame.display.flip()
-            control = agent.run_step()
+            control = agent.run_step(step=timestamp.frame_count)
             control.manual_gear_shift = False
             world.player.apply_control(control)
 
@@ -810,6 +816,11 @@ def main():
         action='store_true',
         dest='synchronous_mode',
         help='turn on synchronous mode')
+    argparser.add_argument(
+        '-r', '--record-spline',
+        action='store_true',
+        dest='record_spline',
+        help='data collection for waypoint generator trainings')
     argparser.add_argument(
         '--host',
         metavar='H',

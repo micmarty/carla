@@ -33,8 +33,9 @@ class GUTAgent(Agent):
         self._proximity_threshold = 20.0  # meters
         self._state = AgentState.NAVIGATING
         self._local_planner = LocalPlanner(self._vehicle)
+        self.recording = False
 
-    def run_step(self, debug=False):
+    def run_step(self, step, debug=False):
         """
         Execute one step of navigation.
         :return: carla.VehicleControl
@@ -60,7 +61,7 @@ class GUTAgent(Agent):
         #     hazard_detected = True
 
         # # check for the state of the traffic lights
-        is_red_light_ahead, traffic_light = self._is_light_red(lights_list)
+        # is_red_light_ahead, traffic_light = self._is_light_red(lights_list)
 
         
         # if red_light_ahead:
@@ -89,7 +90,7 @@ class GUTAgent(Agent):
         # else:
         self._state = AgentState.NAVIGATING
         # standard local planner behavior
-        control = self._local_planner.run_step()
+        control = self._local_planner.run_step(step=step, recording=self.recording)
         # if is_red_light_ahead:
         #     # TODO TAKE DISTANCE INTO ACCOUNT!
         #     self._state = AgentState.BLOCKED_RED_LIGHT

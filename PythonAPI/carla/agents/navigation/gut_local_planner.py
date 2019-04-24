@@ -12,6 +12,7 @@ from enum import Enum
 from collections import deque
 import random
 import numpy as np
+import json
 # import matplotlib.pyplot as plt
 import carla
 import math
@@ -170,6 +171,7 @@ class LocalPlanner(object):
                 road_options_list = retrieve_options(
                     next_waypoints, last_waypoint)
                 road_option = random.choice(road_options_list)
+                # print('{}, {} | {}'.format(next_waypoint.transform.location.x, next_waypoint.transform.location.y, road_options_list))
                 next_waypoint = next_waypoints[road_options_list.index(
                     road_option)]
 
@@ -194,7 +196,7 @@ class LocalPlanner(object):
         return self._waypoint_buffer
 
 
-    def run_step(self, debug=True):
+    def run_step(self, step, recording=False, debug=True):
         # not enough waypoints in the horizon? => add more!
         if len(self._waypoints_queue) < int(self._waypoints_queue.maxlen * 0.5):
             if not self._global_plan:
@@ -213,19 +215,21 @@ class LocalPlanner(object):
         veh_waypoint = self._map.get_waypoint(veh_location) # type: carla.Waypoint
         veh_yaw = self._vehicle.get_transform().rotation.yaw # TODO type: float, range TODO
         local_plan = self.get_filled_waypoint_buffer() # type: List[carla.Waypoint]
-
+        # print('{}, {}'.format(veh_location.x, veh_location.y))
         # Calculate best waypoint to follow considering current yaw
         L = 2.9
         fx = veh_location.x + L * np.cos(veh_yaw)
         fy = veh_location.y + L * np.sin(veh_yaw)
 
         distances = []
+        spline = []
         for waypoint in local_plan:
             wp = waypoint.transform.location
             dx = fx - wp.x
             dy = fy - wp.y
             distance = np.sqrt(dx ** 2 + dy ** 2)
             distances.append(distance)
+
         target_idx = np.argmin(distances)
         closest_error = distances[target_idx]
 
@@ -239,8 +243,13 @@ class LocalPlanner(object):
         # delta_y = ref_location.y - veh_location.y
         # theta_radians = math.atan2(delta_y, delta_x)
         # FIXME Sometimes yaw oscilates from 179 to -179 which leads to temporarily bad calculations
+        # FIXME In reality it should be the same as spline[-1]
         distance, relative_angle = compute_magnitude_angle(ref_location, veh_location, veh_yaw) #np.rad2deg(theta_radians) - veh_yaw
         
+        spline = []
+        for waypoint in local_plan:
+            wp_distance, wp_rel_angle = compute_magnitude_angle(waypoint.transform.location, veh_location, veh_yaw)
+            spline.append((wp_distance, wp_rel_angle))
         # plt.cla()
         # plt.plot([self._vehicle.get_transform().location.x, lookahead_waypoint.transform.location.x], [self._vehicle.get_transform().location.y, lookahead_waypoint.transform.location.y], "-r", label="debug")
         # # plt.plot(, , ".b", label="lookahead")
@@ -249,18 +258,33 @@ class LocalPlanner(object):
         # plt.grid(True)
         # plt.title("Rel angle: {}, yaw {}".format(str(angle), yaw))
         # plt.pause(0.0001)
+        
+        if relative_angle < -8:
+            direction = 'left'
+        elif relative_angle > 8:
+            direction = 'right'
+        else:
+            direction = 'straight'
 
-        if abs(relative_angle) < 15:
-            target_speed = 50
-        elif abs(relative_angle) < 20:
+        if abs(relative_angle) < 8:
             target_speed = 40
-        elif abs(relative_angle) < 30:
+        elif abs(relative_angle) < 15:
+            target_speed = 35
+        elif abs(relative_angle) < 20:
             target_speed = 30
         else:
-            target_speed = 20
-        print('Relative angle to reference waypoint: {:3d} | Vehicle yaw angle: {:3d} | Target speed {} km/h'.format(
-            int(relative_angle), int(veh_yaw), target_speed            
-        ))
+            target_speed = 27
+        # print('direction: ', direction)
+
+        if recording:
+            debug = False
+            filepath = '_out/{:08d}.json'.format(step)
+            with open(filepath, 'w') as f:
+                json.dump(dict(command=direction, spline=spline), f, indent=4)
+    
+        # print('Relative angle to reference waypoint: {:3d} | Vehicle yaw angle: {:3d} | Target speed {} km/h'.format(
+        #     int(relative_angle), int(veh_yaw), target_speed            
+        # ))
 
         control = self._vehicle_controller.run_step(target_speed, self._target_waypoint)
 
@@ -279,14 +303,16 @@ class LocalPlanner(object):
         if debug:
             #draw_waypoints(self._vehicle.get_world(), [self._target_waypoint], self._vehicle.get_location().z + 1.0, color=carla.Color(0, 255, 0))
             #draw_waypoints(self._vehicle.get_world(), [reference_waypoint], veh_location.z + 1.0)
+            world = self._vehicle.get_world()
+            world.debug.draw_point(local_plan[-1].transform.location, size=0.1, color=carla.Color(0, 255, 0), life_time=1.0, persistent_lines=True)
 
             # Nearest waypoints with relative coordinates (input for waypoint generator model)
             short_plan = itertools.islice(local_plan, 0, 6)
             for wp in short_plan:
                 x = wp.transform.location.x
                 y = wp.transform.location.y
-                print('Waypoint ({:.2f}, {:.2f}), Veh: ({:.2f}, {:.2f}), Relative: {}'.format(x,y, veh_location.x, veh_location.y, wp.transform.location - veh_location))
-            draw_waypoints(self._vehicle.get_world(), itertools.islice(local_plan, 0, 6), veh_location.z + 1.0)
+                # print('Waypoint ({:.2f}, {:.2f}), Veh: ({:.2f}, {:.2f}), Relative: {}'.format(x,y, veh_location.x, veh_location.y, wp.transform.location - veh_location))
+            draw_waypoints(world, itertools.islice(local_plan, 0, 6), veh_location.z + 1.0)
             pass
 
         return control
