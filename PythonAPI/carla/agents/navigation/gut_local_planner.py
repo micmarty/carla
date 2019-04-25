@@ -282,9 +282,9 @@ class LocalPlanner(object):
             with open(filepath, 'w') as f:
                 json.dump(dict(command=direction, spline=spline), f, indent=4)
     
-        # print('Relative angle to reference waypoint: {:3d} | Vehicle yaw angle: {:3d} | Target speed {} km/h'.format(
-        #     int(relative_angle), int(veh_yaw), target_speed            
-        # ))
+        print('Relative angle to reference waypoint: {:3d} | Vehicle yaw angle: {:3d} | Target speed {} km/h'.format(
+            int(relative_angle), int(veh_yaw), target_speed            
+        ))
 
         control = self._vehicle_controller.run_step(target_speed, self._target_waypoint)
 
