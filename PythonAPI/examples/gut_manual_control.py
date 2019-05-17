@@ -119,6 +119,8 @@ except ImportError:
     raise RuntimeError('cannot import numpy, make sure numpy package is installed')
 
 import imageio
+import tensorflow as tf
+from detector import StopDetector
 # ==============================================================================
 # -- Global functions ----------------------------------------------------------
 # ==============================================================================
@@ -183,6 +185,26 @@ class World(object):
         self.recording_enabled = False
         self.recording_start = 0
 
+        ### BARTEK RADEK ###
+        self.detector = StopDetector()
+
+        # TODO Copy from DGX: /home/miczi/ai/Repos/models/workspace/carla_detector/trained-inference-graphs/output_inference_graph_v2.pb/frozen_inference_graph.pb
+        # FIXME Replace frozen_graph_path
+        frozen_graph_path = '/home/miczi/repos/output_inference_graph_v2.pb/frozen_inference_graph.pb'
+        detection_graph = tf.Graph()
+        with detection_graph.as_default():
+            graph_def = tf.GraphDef()
+            with tf.gfile.FastGFile(frozen_graph_path, "rb") as f:
+                graph_def.ParseFromString(f.read())
+                tf.import_graph_def(graph_def, name="")
+            self.tf_sess = tf.Session(graph=detection_graph)
+        self.image_tensor = detection_graph.get_tensor_by_name('image_tensor:0')
+        self.detection_boxes = detection_graph.get_tensor_by_name('detection_boxes:0')
+        self.detection_scores = detection_graph.get_tensor_by_name('detection_scores:0')
+        self.detection_classes = detection_graph.get_tensor_by_name('detection_classes:0')
+        self.num_detections = detection_graph.get_tensor_by_name('num_detections:0')
+        ### BARTEK RADEK ###
+
     def restart(self):
         # Keep same camera config if the camera manager exists.
         cam_index = self.camera_manager.index if self.camera_manager is not None else 0
@@ -225,8 +247,21 @@ class World(object):
     def tick(self, clock):
         self.hud.tick(self, clock)
 
+
+    def detect(self, image: np.ndarray) -> tuple:
+        image_np_expanded = np.expand_dims(image, axis=0)
+        (boxes, scores, classes, num) = self.tf_sess.run(
+            [self.detection_boxes, self.detection_scores, self.detection_classes, self.num_detections],
+            feed_dict={self.image_tensor: image_np_expanded})
+        return boxes, classes
+
     def render(self, display):
+        ### BARTEK RADEK ###
         self.camera_manager.render(display)
+        boxes, classes = self.detect(self.camera_manager.image_arr)
+        if self.detector.light_stop(np.squeeze(boxes), np.squeeze(classes)):
+            self.hud.notification('Stop!')
+        ### BARTEK RADEK ###
         self.hud.render(display)
 
     def destroy_sensors(self):
@@ -687,6 +722,7 @@ class CameraManager(object):
             carla.Transform(carla.Location(x=-5.5, z=2.8), carla.Rotation(pitch=-15)),
             carla.Transform(carla.Location(x=1.6, z=1.7))]
         self.transform_index = 1
+        self.image_arr = np.zeros((800, 600, 3))
         self.sensors = [
             ['sensor.camera.rgb', cc.Raw, 'Camera RGB'],
             ['sensor.camera.depth', cc.Raw, 'Camera Depth (Raw)'],
@@ -703,6 +739,7 @@ class CameraManager(object):
             if item[0].startswith('sensor.camera'):
                 bp.set_attribute('image_size_x', str(hud.dim[0]))
                 bp.set_attribute('image_size_y', str(hud.dim[1]))
+                bp.set_attribute('fov', '90')
             elif item[0].startswith('sensor.lidar'):
                 bp.set_attribute('range', '5000')
             item.append(bp)
@@ -767,6 +804,8 @@ class CameraManager(object):
             array = np.reshape(array, (image.height, image.width, 4))
             array = array[:, :, :3]
             array = array[:, :, ::-1]
+            self.image_arr = array
+
             self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
         if self.recording:
             buffered_save(image)
