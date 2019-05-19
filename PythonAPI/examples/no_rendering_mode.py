@@ -54,8 +54,9 @@ import carla
 from carla import TrafficLightState as tls
 from carla import ColorConverter as cc
 sys.path.append(glob.glob('../carla')[0]) # agents
-from agents.tools.misc import draw_waypoints, distance_vehicle, compute_magnitude_angle
+from agents.tools.misc import draw_waypoints, distance_vehicle, custom_compute_magnitude_angle
 from agents.navigation.controller import VehiclePIDController
+import json
 import numpy as np
 import argparse
 import logging
@@ -787,6 +788,7 @@ class ModuleWorld(object):
         self.timeout = timeout
         self.server_fps = 0.0
         self.simulation_time = 0
+        self.step = 0
         self.server_clock = pygame.time.Clock()
 
         # World data
@@ -843,25 +845,49 @@ class ModuleWorld(object):
 
 
     def compute_command_to_waypoint(self, start_waypoint, target_waypoint):
-        c = start_waypoint.transform.rotation.yaw
-        c = c % 360.0
+        # c = start_waypoint.transform.rotation.yaw
+        # c = c % 360.0
 
-        n = target_waypoint.transform.rotation.yaw
-        n = n % 360.0
+        # n = target_waypoint.transform.rotation.yaw
+        # n = n % 360.0
 
-        diff_angle = (n - c) % 180.0
-        if diff_angle < 10.0:
+        # diff_angle = (n - c) % 180.0
+        _, diff_angle = custom_compute_magnitude_angle(target_waypoint.transform.location, start_waypoint.transform.location, start_waypoint.transform.rotation.yaw)
+        if abs(diff_angle) <= 8.0:
             return 'straight'
-        elif diff_angle > 90.0:
+        if diff_angle < -8.0:
             return 'left'
-        else:
+        if diff_angle > 8.0:
             return 'right'
+        # if diff_angle < 10.0:
+        #     return 'straight'
+        # elif diff_angle > 90.0:
+        #     return 'left'
+        # else:
+        #     return 'right'
 
-    def compute_next_route_waypoints(self, from_location, n=50):
-        current_waypoint = self.world.get_map().get_waypoint(from_location)
-        horizon_range: int = 6
-        for idx in range(n):
-            available_options = current_waypoint.next(2.0)
+    def fill_waypoint_buffer(self):
+        target_buffer_size = 40
+        reference_waypoint_offset = 6 # How much waypoints ahead of vehicle is our reference waypoint (for calculating intersection command)
+        waypoint_lookup_range = 2.0 # How far away waypoints returned by API should be placed
+        if len(self.route) > (target_buffer_size / 2):
+            return
+
+        # Buffer needs to be filled
+        initial_buffer_size = len(self.route)
+        empty_buffer_slots = target_buffer_size - initial_buffer_size
+
+        if initial_buffer_size < 1:
+            vehicle_location = self.hero_actor.get_location()
+            current_waypoint = self.world.get_map().get_waypoint(vehicle_location)
+            # print('od nowa')
+        else:
+            # Continue calculations from last waypoint in route
+            current_waypoint = self.route[-1][0]
+            # print('kontynuuje, bo size jest', initial_buffer_size)
+
+        for _ in range(empty_buffer_slots):
+            available_options = current_waypoint.next(waypoint_lookup_range)
             next_waypoint = random.choice(available_options)
             if len(available_options) == 1:
                 next_waypoint = available_options[0]
@@ -889,17 +915,28 @@ class ModuleWorld(object):
             
             # print(next_waypoint)
             # print(current_waypoint, ' -> ', next_waypoint, ' | command: ', command)
-            
-        for idx in range(n - horizon_range):
+            #endregion
+        steps_to_hold_command = 10
+        # We must correct last few commands in buffer
+        for idx in range(initial_buffer_size - reference_waypoint_offset, target_buffer_size - reference_waypoint_offset):
             waypoint, command = self.route[idx]
-            reference_waypoint, _ = self.route[idx + horizon_range]
-            if not command:
+            reference_waypoint, _ = self.route[idx + reference_waypoint_offset]
+            if command is None:
+                # print('znalazlem none na idx', idx)
+                # If there were multiple options to choose from, we must decide now what the command is
+                # Command is calculated based on angle between these two waypoints
                 active_command = self.compute_command_to_waypoint(start_waypoint=waypoint, target_waypoint=reference_waypoint)
+                # Overwrite old command
                 self.route[idx] = waypoint, active_command
-                for i in range(1, horizon_range):
-                    self.route[idx + i] = self.route[idx + i][0], active_command
-        self.route = self.route[:-horizon_range]
+                #print('comenda dla idx=', idx, 'to teraz', active_command)
 
+                # Copy the same command to a few waypoints ahead of us (hold during maneuver)
+                start_idx = idx + 1
+                for neighbour_idx in range(start_idx, min(start_idx + steps_to_hold_command, target_buffer_size)):
+                    # Don't mutate original waypoint data, overwrite command only
+                    self.route[neighbour_idx] = self.route[neighbour_idx][0], active_command
+                    # print('backtrace, idx=', neighbour_idx, 'to teraz', active_command)
+        # print('-----------------')
     def maybe_dump_image(self, image):
         if self.module_input.record_dataset:
             image.save_to_disk('_out/%06d.png' % image.frame_number, cc.Raw)
@@ -978,7 +1015,7 @@ class ModuleWorld(object):
             'K_I': 0.0258,
             'dt': dt}
         self.vehicle_controller = VehiclePIDController(self.hero_actor, args_lateral=args_lateral_dict, args_longitudinal=args_longitudinal_dict)
-        self.compute_next_route_waypoints(from_location=self.hero_actor.get_location(), n=50)
+        self.fill_waypoint_buffer()
             # self.world.debug.draw_point(next_waypoint.transform.location, life_time=1000.0)
 
         # for idx in range(300-11):
@@ -1061,11 +1098,11 @@ class ModuleWorld(object):
         # theta_radians = math.atan2(delta_y, delta_x)
         # FIXME Sometimes yaw oscilates from 179 to -179 which leads to temporarily bad calculations
         # FIXME In reality it should be the same as spline[-1]
-        distance, relative_angle = compute_magnitude_angle(ref_location, veh_location, veh_yaw) #np.rad2deg(theta_radians) - veh_yaw
+        distance, relative_angle = custom_compute_magnitude_angle(ref_location, veh_location, veh_yaw) #np.rad2deg(theta_radians) - veh_yaw
         
         spline = []
-        for waypoint, _ in self.route[:7]:
-            wp_distance, wp_rel_angle = compute_magnitude_angle(waypoint.transform.location, veh_location, veh_yaw)
+        for waypoint, command in self.route[:7]:
+            wp_distance, wp_rel_angle = custom_compute_magnitude_angle(waypoint.transform.location, veh_location, veh_yaw)
             spline.append((wp_distance, wp_rel_angle))
         # plt.cla()
         # plt.plot([self._vehicle.get_transform().location.x, lookahead_waypoint.transform.location.x], [self._vehicle.get_transform().location.y, lookahead_waypoint.transform.location.y], "-r", label="debug")
@@ -1076,12 +1113,12 @@ class ModuleWorld(object):
         # plt.title("Rel angle: {}, yaw {}".format(str(angle), yaw))
         # plt.pause(0.0001)
         
-        if relative_angle < -8:
-            direction = 'left'
-        elif relative_angle > 8:
-            direction = 'right'
-        else:
-            direction = 'straight'
+        # if relative_angle < -8:
+        #     direction = 'left'
+        # elif relative_angle > 8:
+        #     direction = 'right'
+        # else:
+        #     direction = 'straight'
 
         if abs(relative_angle) < 8:
             target_speed = 40
@@ -1093,11 +1130,12 @@ class ModuleWorld(object):
             target_speed = 27
         # print('direction: ', direction)
 
-        # if recording:
-        #     debug = False
-        #     filepath = '_out/{:08d}.json'.format(step)
-        #     with open(filepath, 'w') as f:
-        #         json.dump(dict(command=direction, spline=spline), f, indent=4)
+        if self.module_input.record_dataset:
+            filepath = '_out/spline/{:08d}.json'.format(self.step)
+            with open(filepath, 'w') as f:
+                closest_command = self.route[0][1]
+                json.dump(dict(command=closest_command, spline=spline), f)
+                print(f'[{self.step}] Saved:', closest_command)
 
         # MICZI
         # print('Relative angle to reference waypoint: {:3d} | Vehicle yaw angle: {:3d} | Target speed {} km/h'.format(
@@ -1129,12 +1167,12 @@ class ModuleWorld(object):
                 # if max_dist_idx + 6 < len(self.route):
                 #     self.world.debug.draw_point(self.route[max_dist_idx + 6][2].transform.location, life_time=1.0, color=carla.Color(0, 255, 0))
                 # self.hud.notification(f'Command: {elem[1]} | {int(elem[0])}')
-                print(f'Command: {elem[1]}')
+
+                # Useful, uncomment
+                #print(f'Command: {elem[1]}')
                 self.route = self.route[max_dist_idx + 1:]
                 
-                
-        if len(self.route) < 20:
-            self.compute_next_route_waypoints(from_location=self.route[-1][0].transform.location, n=30)
+        self.fill_waypoint_buffer()
         self.update_hud_info(clock)
 
     def update_hud_info(self, clock):
@@ -1190,6 +1228,7 @@ class ModuleWorld(object):
         self.server_clock.tick()
         self.server_fps = self.server_clock.get_fps()
         self.simulation_time = timestamp.elapsed_seconds
+        self.step = timestamp.frame_count
 
     def _split_actors(self):
         vehicles = []

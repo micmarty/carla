@@ -68,8 +68,18 @@ def is_within_distance_ahead(target_location, current_location, orientation, max
 
     return d_angle < 90.0
 
+def distance_points(x1, y1, x2, y2):
+    return math.sqrt((x1-x2)**2 + (y1-y2)**2)
 
-def compute_magnitude_angle(target_location, current_location, orientation):
+def rotate_point(x, y, angle):
+    angle = angle / 180 * math.pi
+    s = math.sin(angle)
+    c = math.cos(angle)
+    new_x = x * c - y * s
+    new_y = x * s + y * c
+    return (new_x, new_y)
+
+def custom_compute_magnitude_angle(target_location, current_location, orientation):
     """
     Compute relative angle and distance between a target_location and a current_location
 
@@ -81,10 +91,39 @@ def compute_magnitude_angle(target_location, current_location, orientation):
     target_vector = np.array([target_location.x - current_location.x, target_location.y - current_location.y])
     norm_target = np.linalg.norm(target_vector)
 
+    normal_vector = target_vector / norm_target
     forward_vector = np.array([math.cos(math.radians(orientation)), math.sin(math.radians(orientation))])
+
     d_angle = math.degrees(math.acos(np.dot(forward_vector, target_vector) / norm_target))
 
+    rotate_right_x, rotate_right_y = rotate_point(normal_vector[0], normal_vector[1], d_angle)
+    rotate_left_x, rotate_left_y = rotate_point(normal_vector[0], normal_vector[1], -d_angle)
+
+    dest_x, dest_y = forward_vector[0], forward_vector[1]
+    right_dist = distance_points(rotate_right_x, rotate_right_y, dest_x, dest_y)
+    left_dist = distance_points(rotate_left_x, rotate_left_y, dest_x, dest_y)
+
+    if left_dist > right_dist:
+        d_angle *= -1
+
     return (norm_target, d_angle)
+
+# def compute_magnitude_angle(target_location, current_location, orientation):
+#     """
+#     Compute relative angle and distance between a target_location and a current_location
+
+#     :param target_location: location of the target object
+#     :param current_location: location of the reference object
+#     :param orientation: orientation of the reference object
+#     :return: a tuple composed by the distance to the object and the angle between both objects
+#     """
+#     target_vector = np.array([target_location.x - current_location.x, target_location.y - current_location.y])
+#     norm_target = np.linalg.norm(target_vector)
+
+#     forward_vector = np.array([math.cos(math.radians(orientation)), math.sin(math.radians(orientation))])
+#     d_angle = math.degrees(math.acos(np.dot(forward_vector, target_vector) / norm_target))
+
+#     return (norm_target, d_angle)
 
 
 def distance_vehicle(waypoint, vehicle_transform):
