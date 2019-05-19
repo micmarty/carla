@@ -120,6 +120,8 @@ except ImportError:
 
 import imageio
 import tensorflow as tf
+sys.path.append(glob.glob('../carla')[0]) # agents
+from agents.tools.misc import draw_waypoints, distance_vehicle, compute_magnitude_angle
 from detector import StopDetector
 # ==============================================================================
 # -- Global functions ----------------------------------------------------------
@@ -190,19 +192,19 @@ class World(object):
 
         # TODO Copy from DGX: /home/miczi/ai/Repos/models/workspace/carla_detector/trained-inference-graphs/output_inference_graph_v2.pb/frozen_inference_graph.pb
         # FIXME Replace frozen_graph_path
-        frozen_graph_path = '/home/miczi/repos/output_inference_graph_v2.pb/frozen_inference_graph.pb'
-        detection_graph = tf.Graph()
-        with detection_graph.as_default():
-            graph_def = tf.GraphDef()
-            with tf.gfile.FastGFile(frozen_graph_path, "rb") as f:
-                graph_def.ParseFromString(f.read())
-                tf.import_graph_def(graph_def, name="")
-            self.tf_sess = tf.Session(graph=detection_graph)
-        self.image_tensor = detection_graph.get_tensor_by_name('image_tensor:0')
-        self.detection_boxes = detection_graph.get_tensor_by_name('detection_boxes:0')
-        self.detection_scores = detection_graph.get_tensor_by_name('detection_scores:0')
-        self.detection_classes = detection_graph.get_tensor_by_name('detection_classes:0')
-        self.num_detections = detection_graph.get_tensor_by_name('num_detections:0')
+        # frozen_graph_path = 'E:\\detektor_ai\\frozen_inference_graph.pb'
+        # detection_graph = tf.Graph()
+        # with detection_graph.as_default():
+        #     graph_def = tf.GraphDef()
+        #     with tf.gfile.FastGFile(frozen_graph_path, "rb") as f:
+        #         graph_def.ParseFromString(f.read())
+        #         tf.import_graph_def(graph_def, name="")
+        #     self.tf_sess = tf.Session(graph=detection_graph)
+        # self.image_tensor = detection_graph.get_tensor_by_name('image_tensor:0')
+        # self.detection_boxes = detection_graph.get_tensor_by_name('detection_boxes:0')
+        # self.detection_scores = detection_graph.get_tensor_by_name('detection_scores:0')
+        # self.detection_classes = detection_graph.get_tensor_by_name('detection_classes:0')
+        # self.num_detections = detection_graph.get_tensor_by_name('num_detections:0')
         ### BARTEK RADEK ###
 
     def restart(self):
@@ -237,6 +239,32 @@ class World(object):
         actor_type = get_actor_display_name(self.player)
         self.hud.notification(actor_type)
 
+        self.route = []
+        current_waypoint = self.map.get_waypoint(self.player.get_location())
+        for idx in range(300):
+            next_waypoint = random.choice(current_waypoint.next(2.0))
+            # print(next_waypoint)
+            self.route.append(next_waypoint)
+            current_waypoint = next_waypoint
+            self.world.debug.draw_point(next_waypoint.transform.location, life_time=1000.0)
+
+        for idx in range(300-11):
+            # print(self.route[idx], self.route[idx+6])
+            _, angle = compute_magnitude_angle(self.route[idx + 6].transform.location, self.route[idx].transform.location, self.route[idx].transform.rotation.yaw)
+            straight = abs(angle) <= 5
+            angle = -angle
+            left = angle < -5
+            right = angle > 5
+            if straight:
+                command = 'straight'
+            elif left:
+                command = 'left'
+            elif right:
+                command = 'right'
+            self.route[idx] = (angle, command, self.route[idx])
+        self.route = self.route[:300-11]
+        self.world.debug.draw_point(self.route[-1][2].transform.location, size=1.0, life_time=100.0, color=carla.Color(177, 25, 74))
+
     def next_weather(self, reverse=False):
         self._weather_index += -1 if reverse else 1
         self._weather_index %= len(self._weather_presets)
@@ -257,10 +285,24 @@ class World(object):
 
     def render(self, display):
         ### BARTEK RADEK ###
+        horizon = 0.8 * 30 / 3.6
+        max_dist_idx = -1
+        for idx, elem in enumerate(self.route[:50]):
+            angle, command, waypoint = elem
+            if distance_vehicle(waypoint, self.player.get_transform()) < horizon:
+                max_dist_idx = idx
+        if max_dist_idx >= 0:
+            elem = self.route[max_dist_idx]
+            self.world.debug.draw_point(elem[2].transform.location, life_time=1.0, color=carla.Color(0, 255, 0))
+            if max_dist_idx + 6 < len(self.route):
+                self.world.debug.draw_point(self.route[max_dist_idx + 6][2].transform.location, life_time=1.0, color=carla.Color(0, 255, 0))
+            self.hud.notification(f'Command: {elem[1]} | {int(elem[0])}')
+            self.route = self.route[max_dist_idx + 1:]
         self.camera_manager.render(display)
-        boxes, classes = self.detect(self.camera_manager.image_arr)
-        if self.detector.light_stop(np.squeeze(boxes), np.squeeze(classes)):
-            self.hud.notification('Stop!')
+        # klasyfikacja
+        # boxes, classes = self.detect(self.camera_manager.image_arr)
+        # if self.detector.light_stop(np.squeeze(boxes), np.squeeze(classes)):
+        #     self.hud.notification('Stop!')
         ### BARTEK RADEK ###
         self.hud.render(display)
 
@@ -428,7 +470,7 @@ class HUD(object):
     def __init__(self, width, height):
         self.dim = (width, height)
         font = pygame.font.Font(pygame.font.get_default_font(), 20)
-        fonts = [x for x in pygame.font.get_fonts() if 'mono' in x]
+        fonts = [x for x in pygame.font.get_fonts()] # if 'mono' in x]
         default_font = 'ubuntumono'
         mono = default_font if default_font in fonts else fonts[0]
         mono = pygame.font.match_font(mono)
@@ -808,8 +850,9 @@ class CameraManager(object):
 
             self.surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
         if self.recording:
-            buffered_save(image)
-            #image.save_to_disk('_out/%08d' % image.frame_number)
+            #buffered_save(image)
+            print(image.frame_number)
+            image.save_to_disk('_out/%08d' % image.frame_number)
 
 
 # ==============================================================================
@@ -824,7 +867,7 @@ def game_loop(args):
 
     try:
         client = carla.Client(args.host, args.port)
-        client.set_timeout(2.0)
+        client.set_timeout(5.0)
 
         display = pygame.display.set_mode(
             (args.width, args.height),

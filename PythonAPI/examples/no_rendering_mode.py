@@ -52,14 +52,17 @@ except IndexError:
 
 import carla
 from carla import TrafficLightState as tls
-
+from carla import ColorConverter as cc
+sys.path.append(glob.glob('../carla')[0]) # agents
+from agents.tools.misc import draw_waypoints, distance_vehicle, compute_magnitude_angle
+from agents.navigation.controller import VehiclePIDController
+import numpy as np
 import argparse
 import logging
 import datetime
 import weakref
 import math
 import random
-
 try:
     import pygame
     from pygame.locals import KMOD_CTRL
@@ -81,6 +84,7 @@ try:
     from pygame.locals import K_i
     from pygame.locals import K_m
     from pygame.locals import K_p
+    from pygame.locals import K_r
     from pygame.locals import K_q
     from pygame.locals import K_s
     from pygame.locals import K_w
@@ -292,7 +296,7 @@ class ModuleHUD (object):
         pass
 
     def _init_hud_params(self):
-        fonts = [x for x in pygame.font.get_fonts() if 'mono' in x]
+        fonts = [x for x in pygame.font.get_fonts()] # if 'mono' in x]
         default_font = 'ubuntumono'
         mono = default_font if default_font in fonts else fonts[0]
         mono = pygame.font.match_font(mono)
@@ -815,6 +819,10 @@ class ModuleWorld(object):
         self.original_surface_size = None
         self.hero_surface = None
         self.actors_surface = None
+        
+        # MICZI
+        self.camera = None
+        self.route = []
 
     def _get_data_from_carla(self):
         try:
@@ -832,6 +840,69 @@ class ModuleWorld(object):
         except RuntimeError as ex:
             logging.error(ex)
             exit_game()
+
+
+    def compute_command_to_waypoint(self, start_waypoint, target_waypoint):
+        c = start_waypoint.transform.rotation.yaw
+        c = c % 360.0
+
+        n = target_waypoint.transform.rotation.yaw
+        n = n % 360.0
+
+        diff_angle = (n - c) % 180.0
+        if diff_angle < 10.0:
+            return 'straight'
+        elif diff_angle > 90.0:
+            return 'left'
+        else:
+            return 'right'
+
+    def compute_next_route_waypoints(self, from_location, n=50):
+        current_waypoint = self.world.get_map().get_waypoint(from_location)
+        horizon_range: int = 6
+        for idx in range(n):
+            available_options = current_waypoint.next(2.0)
+            next_waypoint = random.choice(available_options)
+            if len(available_options) == 1:
+                next_waypoint = available_options[0]
+                command = 'keep_lane'
+            else:
+                next_waypoint = random.choice(available_options)
+                command = None
+            self.route.append((current_waypoint, command))
+            current_waypoint = next_waypoint
+
+            # if idx % 60 == 0:
+            #     if current_waypoint.lane_change & carla.LaneChange.Right:
+            #         right_w = current_waypoint.get_right_lane()
+            #         if right_w and right_w.lane_type == carla.LaneType.Driving:
+            #             command = 'lane_change_right'
+            #             next_waypoint = random.choice(right_w.next(2.0))
+
+            #     # check for available left driving lanes
+            #     if current_waypoint.lane_change & carla.LaneChange.Left:
+            #         left_w = current_waypoint.get_left_lane()
+            #         if left_w and left_w.lane_type == carla.LaneType.Driving:
+            #             command = 'lane_change_left'
+            #             next_waypoint = random.choice(left_w.next(2.0))
+
+            
+            # print(next_waypoint)
+            # print(current_waypoint, ' -> ', next_waypoint, ' | command: ', command)
+            
+        for idx in range(n - horizon_range):
+            waypoint, command = self.route[idx]
+            reference_waypoint, _ = self.route[idx + horizon_range]
+            if not command:
+                active_command = self.compute_command_to_waypoint(start_waypoint=waypoint, target_waypoint=reference_waypoint)
+                self.route[idx] = waypoint, active_command
+                for i in range(1, horizon_range):
+                    self.route[idx + i] = self.route[idx + i][0], active_command
+        self.route = self.route[:-horizon_range]
+
+    def maybe_dump_image(self, image):
+        if self.module_input.record_dataset:
+            image.save_to_disk('_out/%06d.png' % image.frame_number, cc.Raw)
 
     def start(self):
         self.world, self.town_map = self._get_data_from_carla()
@@ -883,6 +954,50 @@ class ModuleWorld(object):
         # Start hero mode by default
         self.select_hero_actor()
         self.hero_actor.set_autopilot(False)
+
+        # MICZI
+        camera_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
+        camera_bp.set_attribute('image_size_x', '224')
+        camera_bp.set_attribute('image_size_y', '224')
+        camera_bp.set_attribute('fov', '120')
+        camera_transform = carla.Transform(carla.Location(x=2.3, z=1.8), carla.Rotation(pitch=-22))
+        self.camera = self.world.spawn_actor(camera_bp, camera_transform, attach_to=self.hero_actor)
+        # actor_list.append(camera)
+        print('created %s' % self.camera.type_id)
+        self.camera.listen(lambda image: self.maybe_dump_image(image))
+
+        dt = 1.0/5.0
+        args_lateral_dict = {
+            'K_P': .5,
+            'K_D': 0.01,
+            'K_I': 0.4,
+            'dt': dt}
+        args_longitudinal_dict = {
+            'K_P': 0.2,
+            'K_D': 0.014,
+            'K_I': 0.0258,
+            'dt': dt}
+        self.vehicle_controller = VehiclePIDController(self.hero_actor, args_lateral=args_lateral_dict, args_longitudinal=args_longitudinal_dict)
+        self.compute_next_route_waypoints(from_location=self.hero_actor.get_location(), n=50)
+            # self.world.debug.draw_point(next_waypoint.transform.location, life_time=1000.0)
+
+        # for idx in range(300-11):
+        #     # print(self.route[idx], self.route[idx+6])
+        #     _, angle = compute_magnitude_angle(self.route[idx + 6].transform.location, self.route[idx].transform.location, self.route[idx].transform.rotation.yaw)
+        #     straight = abs(angle) <= 5
+        #     angle = -angle
+        #     left = angle < -5
+        #     right = angle > 5
+        #     if straight:
+        #         command = 'straight'
+        #     elif left:
+        #         command = 'left'
+        #     elif right:
+        #         command = 'right'
+        #     self.route[idx] = (angle, command, self.route[idx])
+        # self.route = self.route[:300-11]
+        # MICZI
+
         self.module_input.wheel_offset = HERO_DEFAULT_SCALE
         self.module_input.control = carla.VehicleControl()
 
@@ -900,7 +1015,7 @@ class ModuleWorld(object):
 
     def _spawn_hero(self):
         # Get a random blueprint.
-        blueprint = random.choice(self.world.get_blueprint_library().filter(self.args.filter))
+        blueprint = random.choice(self.world.get_blueprint_library().filter('vehicle.lincoln.mkz2017'))
         blueprint.set_attribute('role_name', 'hero')
         if blueprint.has_attribute('color'):
             color = random.choice(blueprint.get_attribute('color').recommended_values)
@@ -915,11 +1030,111 @@ class ModuleWorld(object):
         # Save it in order to destroy it when closing program
         self.spawned_hero = self.hero_actor
 
+    def todo(self):
+        veh_location = self.hero_actor.get_location()  # type: carla.Location
+        veh_yaw = self.hero_actor.get_transform().rotation.yaw
+
+        L = 2.9
+        fx = veh_location.x + L * np.cos(veh_yaw)
+        fy = veh_location.y + L * np.sin(veh_yaw)
+
+        distances = []
+        spline = []
+        for waypoint, _ in self.route[:7]:
+            wp = waypoint.transform.location
+            dx = fx - wp.x
+            dy = fy - wp.y
+            distance = np.sqrt(dx ** 2 + dy ** 2)
+            distances.append(distance)
+
+        target_idx = np.argmin(distances)
+        closest_error = distances[target_idx]
+
+        target_waypoint = self.route[target_idx][0]
+        
+        # Calculate path curvature
+        waypoints_to_look_ahead = 6
+        reference_waypoint = self.route[target_idx + waypoints_to_look_ahead][0]
+        ref_location = reference_waypoint.transform.location
+        # delta_x = ref_location.x - veh_location.x
+        # delta_y = ref_location.y - veh_location.y
+        # theta_radians = math.atan2(delta_y, delta_x)
+        # FIXME Sometimes yaw oscilates from 179 to -179 which leads to temporarily bad calculations
+        # FIXME In reality it should be the same as spline[-1]
+        distance, relative_angle = compute_magnitude_angle(ref_location, veh_location, veh_yaw) #np.rad2deg(theta_radians) - veh_yaw
+        
+        spline = []
+        for waypoint, _ in self.route[:7]:
+            wp_distance, wp_rel_angle = compute_magnitude_angle(waypoint.transform.location, veh_location, veh_yaw)
+            spline.append((wp_distance, wp_rel_angle))
+        # plt.cla()
+        # plt.plot([self._vehicle.get_transform().location.x, lookahead_waypoint.transform.location.x], [self._vehicle.get_transform().location.y, lookahead_waypoint.transform.location.y], "-r", label="debug")
+        # # plt.plot(, , ".b", label="lookahead")
+        # plt.axis("equal")
+        # plt.legend()
+        # plt.grid(True)
+        # plt.title("Rel angle: {}, yaw {}".format(str(angle), yaw))
+        # plt.pause(0.0001)
+        
+        if relative_angle < -8:
+            direction = 'left'
+        elif relative_angle > 8:
+            direction = 'right'
+        else:
+            direction = 'straight'
+
+        if abs(relative_angle) < 8:
+            target_speed = 40
+        elif abs(relative_angle) < 15:
+            target_speed = 35
+        elif abs(relative_angle) < 20:
+            target_speed = 30
+        else:
+            target_speed = 27
+        # print('direction: ', direction)
+
+        # if recording:
+        #     debug = False
+        #     filepath = '_out/{:08d}.json'.format(step)
+        #     with open(filepath, 'w') as f:
+        #         json.dump(dict(command=direction, spline=spline), f, indent=4)
+
+        # MICZI
+        # print('Relative angle to reference waypoint: {:3d} | Vehicle yaw angle: {:3d} | Target speed {} km/h'.format(
+        #     int(relative_angle), int(veh_yaw), target_speed            
+        # ))
+
+        control = self.vehicle_controller.run_step(target_speed, target_waypoint)
+        return control
+
     def tick(self, clock):
         actors = self.world.get_actors()
         self.actors_with_transforms = [(actor, actor.get_transform()) for actor in actors]
         if self.hero_actor is not None:
             self.hero_transform = self.hero_actor.get_transform()
+            # MICZI
+            control = self.todo()
+            control.manual_gear_shift = False
+            self.hero_actor.apply_control(control)
+
+            horizon = 0.8 * 30 / 3.6
+            max_dist_idx = -1
+            for idx, elem in enumerate(self.route[:50]):
+                waypoint, command = elem
+                if distance_vehicle(waypoint, self.hero_transform) < horizon:
+                    max_dist_idx = idx
+            if max_dist_idx >= 0:
+                elem = self.route[max_dist_idx]
+                # self.world.debug.draw_point(elem[2].transform.location, life_time=1.0, color=carla.Color(0, 255, 0))
+                # if max_dist_idx + 6 < len(self.route):
+                #     self.world.debug.draw_point(self.route[max_dist_idx + 6][2].transform.location, life_time=1.0, color=carla.Color(0, 255, 0))
+                # self.hud.notification(f'Command: {elem[1]} | {int(elem[0])}')
+                print(f'Command: {elem[1]}')
+                self.route = self.route[max_dist_idx + 1:]
+                
+                
+        if len(self.route) < 20:
+            self.compute_next_route_waypoints(from_location=self.route[-1][0].transform.location, n=30)
         self.update_hud_info(clock)
 
     def update_hud_info(self, clock):
@@ -1090,6 +1305,14 @@ class ModuleWorld(object):
             w[1].transform(corners)
             corners = [world_to_pixel(p) for p in corners]
             pygame.draw.polygon(surface, color, corners)
+    # MICZI
+    def _render_waypoints(self, surface, waypoints, color, world_to_pixel, world_to_pixel_width):
+        radius = world_to_pixel_width(0.2)
+        # wp_circle_radius = int(radius * 0.75)
+        for w, command in waypoints:
+            # print(f'{command:10}')
+            x, y = world_to_pixel(w.transform.location)
+            pygame.draw.circle(surface, color, (x, y), radius)
 
     def _render_vehicles(self, surface, list_v, world_to_pixel):
 
@@ -1121,6 +1344,7 @@ class ModuleWorld(object):
         # Dynamic actors
         self._render_vehicles(surface, vehicles, self.map_image.world_to_pixel)
         self._render_walkers(surface, walkers, self.map_image.world_to_pixel)
+        self._render_waypoints(surface, self.route[:30], COLOR_SCARLET_RED_1, self.map_image.world_to_pixel, self.map_image.world_to_pixel_width)
 
     def clip_surfaces(self, clipping_rect):
         self.actors_surface.set_clip(clipping_rect)
@@ -1239,6 +1463,8 @@ class ModuleWorld(object):
     def destroy(self):
         if self.spawned_hero is not None:
             self.spawned_hero.destroy()
+        if self.camera:
+            self.camera.destroy()
 # ==============================================================================
 # -- Input -----------------------------------------------------------
 # ==============================================================================
@@ -1254,6 +1480,7 @@ class ModuleInput(object):
         self._steer_cache = 0.0
         self.control = None
         self._autopilot_enabled = False
+        self.record_dataset = False
 
     def start(self):
         hud = module_manager.get_module(MODULE_HUD)
@@ -1318,6 +1545,12 @@ class ModuleInput(object):
                             world.hero_actor.set_autopilot(self._autopilot_enabled)
                             module_hud = module_manager.get_module(MODULE_HUD)
                             module_hud.notification('Autopilot %s' % ('On' if self._autopilot_enabled else 'Off'))
+                    elif event.key == K_r:
+                        world = module_manager.get_module(MODULE_WORLD)
+                        if world.hero_actor is not None:
+                            self.record_dataset = not self.record_dataset
+                            module_hud = module_manager.get_module(MODULE_HUD)
+                            module_hud.notification('Recording dataset %s' % ('On' if self.record_dataset else 'Off'))
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 4:
                     self.wheel_offset += self.wheel_amount
@@ -1358,7 +1591,8 @@ class ModuleInput(object):
                 self._parse_keys(clock.get_time())
                 self.control.reverse = self.control.gear < 0
             world = module_manager.get_module(MODULE_WORLD)
-            if (world.hero_actor is not None):
+            # MICZI
+            if world.hero_actor is not None and self.record_dataset is False:
                 world.hero_actor.apply_control(self.control)
 
     @staticmethod
