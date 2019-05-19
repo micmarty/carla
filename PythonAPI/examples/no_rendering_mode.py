@@ -994,6 +994,7 @@ class ModuleWorld(object):
         self.hero_actor.set_autopilot(False)
 
         # MICZI
+        self.module_input.record_dataset = self.args.record_dataset
         camera_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
         camera_bp.set_attribute('image_size_x', '224')
         camera_bp.set_attribute('image_size_y', '224')
@@ -1755,6 +1756,10 @@ def main():
         '--no-rendering',
         action='store_true',
         help='switch off server rendering')
+    argparser.add_argument(
+        '--record-dataset',
+        action='store_true',
+        help='For waypoint generation (224x224 + spline)')
     argparser.add_argument(
         '--show-triggers',
         action='store_true',
