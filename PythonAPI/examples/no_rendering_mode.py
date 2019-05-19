@@ -54,7 +54,7 @@ import carla
 from carla import TrafficLightState as tls
 from carla import ColorConverter as cc
 sys.path.append(glob.glob('../carla')[0]) # agents
-from agents.tools.misc import draw_waypoints, distance_vehicle, custom_compute_magnitude_angle
+from agents.tools.misc import draw_waypoints, distance_vehicle, custom_compute_magnitude_angle, get_speed
 from agents.navigation.controller import VehiclePIDController
 import json
 import numpy as np
@@ -825,6 +825,7 @@ class ModuleWorld(object):
         # MICZI
         self.camera = None
         self.route = []
+        self.frames_since_stuck = 0
 
     def _get_data_from_carla(self):
         try:
@@ -1154,6 +1155,19 @@ class ModuleWorld(object):
             control = self.todo()
             control.manual_gear_shift = False
             self.hero_actor.apply_control(control)
+
+            if get_speed(self.hero_actor) < 2.0:
+                self.frames_since_stuck += 1
+                print(f'[{datetime.datetime.now()}] Car is not moving since: {self.frames_since_stuck} frames!')
+            else:
+                self.frames_since_stuck = 0
+            
+            if self.frames_since_stuck > 60 and self.module_input.record_dataset:
+                # Stop executing when stuck
+                print('Exiting, restart simulator because car has stuck!')
+                exit(1)
+            
+                
 
             horizon = 0.8 * 30 / 3.6
             max_dist_idx = -1
