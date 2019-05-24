@@ -56,7 +56,7 @@ from carla import TrafficLightState as tls
 import json
 from carla import ColorConverter as cc
 sys.path.append(glob.glob('../carla')[0]) # agents
-from agents.tools.misc import draw_waypoints, distance_vehicle, custom_compute_magnitude_angle
+from agents.tools.misc import draw_waypoints, distance_vehicle, custom_compute_magnitude_angle, compute_magnitude_angle
 from agents.navigation.controller import VehiclePIDController
 import numpy as np
 
@@ -881,6 +881,8 @@ class ModuleWorld(object):
 
         # GUT spline
         self.global_plan = []
+        self.locked_command = 'keep_lane'
+        self.hold_straight_counter = 0
 
     def _get_data_from_carla(self):
         try:
@@ -904,7 +906,7 @@ class ModuleWorld(object):
             self.last_image = None
         else:
             self.last_image = image
-            print('Image:', image.frame_number)
+            # print('Image:', image.frame_number)
 
     def dump_image(self, image, path):
         image.save_to_disk(path, cc.Raw)
@@ -1075,7 +1077,7 @@ class ModuleWorld(object):
 
         target_plan_length = 20
         initial_plan_length = len(plan)
-        if initial_plan_length > (target_plan_length / 2):
+        if initial_plan_length >= target_plan_length: # Required horizon for computing future commands
             return
 
         if initial_plan_length == 0:
@@ -1121,8 +1123,19 @@ class ModuleWorld(object):
             spline.append((wp_distance, wp_rel_angle))
         return spline
 
+
+    def yaw_diff(self, start_waypoint, target_waypoint):
+        n = start_waypoint.transform.rotation.yaw
+        n = n % 360.0
+
+        c = target_waypoint.transform.rotation.yaw
+        c = c % 360.0
+
+        diff_angle = (n - c) % 180.0
+        return diff_angle
+
     def tick(self, clock):
-        print('World:', self.simulation_step)
+        # print('World:', self.simulation_step)
         actors = self.world.get_actors()
         self.actors_with_transforms = [(actor, actor.get_transform()) for actor in actors]
         if self.hero_actor is not None:
@@ -1131,7 +1144,58 @@ class ModuleWorld(object):
             # Keep plan up-to-date 
             self.update_local_plan()
             self.fill_global_plan()
-            
+
+            ref_wp, num_options_future = self.local_plan[-1]
+            ref_to_ref_wp = self.global_plan[2 * 7][0]  # Yet another reference waypoint
+            # car ---7 waypoints ---> car_to_ref_rel_angle ---7 waypoints ---> ref_to_double_ref_rel_angle
+            _, car_to_ref_rel_angle = compute_magnitude_angle(ref_wp.transform.location, self.hero_transform.location, self.hero_transform.rotation.yaw)
+            try:
+                _, ref_to_double_ref_rel_angle = custom_compute_magnitude_angle(ref_to_ref_wp.transform.location, ref_wp.transform.location, ref_wp.transform.rotation.yaw)
+            except ValueError as e:
+                print(e)
+                print("Bad args")
+                print(ref_to_ref_wp.transform.location)
+                print(ref_wp.transform.location)
+                print(ref_wp.transform.rotation.yaw)
+                print("End of bad args")
+                ref_to_double_ref_rel_angle = 0
+
+            turn_angle_threshold = 6
+            if num_options_future > 1:
+                # Point of decision is ahead
+                if ref_to_double_ref_rel_angle <= -turn_angle_threshold:
+                    command = 'left'
+                elif ref_to_double_ref_rel_angle >= turn_angle_threshold:
+                    command = 'right'
+                else:
+                    command = 'straight'
+                print('choosing', command)
+                self.locked_command = command
+            else:
+                # Only one option is ahead of us
+
+                # If we were turning, but now angle to ref is small
+                if self.locked_command in ['left', 'right'] and abs(ref_to_double_ref_rel_angle) < turn_angle_threshold and abs(car_to_ref_rel_angle) < 15:
+                    # Reset state, route curvature is smooth again
+                    command = 'keep_lane'
+                    self.locked_command = 'keep_lane'
+                elif self.locked_command == 'straight':
+                    if self.hold_straight_counter > 14:
+                        command = 'keep_lane'
+                        self.locked_command = 'keep_lane'
+                        self.hold_straight_counter = 0
+                    else:
+                        command = 'straight'
+                        self.locked_command = 'straight'
+                        self.hold_straight_counter += 1
+                else:
+                    command = self.locked_command
+            # command = self.locked_command or command
+                # ref_after_ref_wp = self.global_plan[idx * 2][0]
+                # if self.yaw_diff(ref_wp, ref_after_ref_wp]) > 10.0:
+
+            # self.module_hud.notification(command, seconds=1.0)
+            print(command, int(car_to_ref_rel_angle), int(ref_to_double_ref_rel_angle))
             # GUT Autopilot
             target_speed = 30
             best_idx = self.compute_idx_of_best_target(self.local_plan, self.hero_transform.location, self.hero_transform.rotation.yaw)
@@ -1142,7 +1206,7 @@ class ModuleWorld(object):
             # GUT Dataset recorder: image + command + spline
             if self.module_input.record_dataset:
                 spline = self.compute_spline_from_local_plan()
-                self.dump_record_to_disk(image=self.last_image, command='TODO', spline=spline)
+                self.dump_record_to_disk(image=self.last_image, command=command, spline=spline)
         self.update_hud_info(clock)
 
     def update_hud_info(self, clock):

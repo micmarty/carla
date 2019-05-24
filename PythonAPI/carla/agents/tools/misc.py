@@ -108,22 +108,22 @@ def custom_compute_magnitude_angle(target_location, current_location, orientatio
 
     return (norm_target, d_angle)
 
-# def compute_magnitude_angle(target_location, current_location, orientation):
-#     """
-#     Compute relative angle and distance between a target_location and a current_location
+def compute_magnitude_angle(target_location, current_location, orientation):
+    """
+    Compute relative angle and distance between a target_location and a current_location
 
-#     :param target_location: location of the target object
-#     :param current_location: location of the reference object
-#     :param orientation: orientation of the reference object
-#     :return: a tuple composed by the distance to the object and the angle between both objects
-#     """
-#     target_vector = np.array([target_location.x - current_location.x, target_location.y - current_location.y])
-#     norm_target = np.linalg.norm(target_vector)
+    :param target_location: location of the target object
+    :param current_location: location of the reference object
+    :param orientation: orientation of the reference object
+    :return: a tuple composed by the distance to the object and the angle between both objects
+    """
+    target_vector = np.array([target_location.x - current_location.x, target_location.y - current_location.y])
+    norm_target = np.linalg.norm(target_vector)
 
-#     forward_vector = np.array([math.cos(math.radians(orientation)), math.sin(math.radians(orientation))])
-#     d_angle = math.degrees(math.acos(np.dot(forward_vector, target_vector) / norm_target))
+    forward_vector = np.array([math.cos(math.radians(orientation)), math.sin(math.radians(orientation))])
+    d_angle = math.degrees(math.acos(np.dot(forward_vector, target_vector) / norm_target))
 
-#     return (norm_target, d_angle)
+    return (norm_target, d_angle)
 
 
 def distance_vehicle(waypoint, vehicle_transform):
