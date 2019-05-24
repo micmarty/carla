@@ -56,7 +56,7 @@ from carla import TrafficLightState as tls
 import json
 from carla import ColorConverter as cc
 sys.path.append(glob.glob('../carla')[0]) # agents
-from agents.tools.misc import draw_waypoints, distance_vehicle
+from agents.tools.misc import draw_waypoints, distance_vehicle, custom_compute_magnitude_angle
 
 import argparse
 import logging
@@ -873,6 +873,7 @@ class ModuleWorld(object):
 
         # GUT recording
         self.camera = None
+        self.last_image = None
         self.idx_in_seq = 0
         self.unique_id = None
 
@@ -896,38 +897,20 @@ class ModuleWorld(object):
             logging.error(ex)
             exit_game()
 
+    def process_image(self, image):
+        self.last_image = image
+        # print('Image:', image.frame_number)
 
-    def maybe_dump_image(self, image):
-        # GUT Recording images from RGB camera 
-        SEQ_LEN = 10
-        # print(self.simulation_step, 'image')
+    def dump_image(self, image, path):
+        image.save_to_disk(path, cc.Raw)
+        # print(f'[{filename}][{self.simulation_step}] Image saved...')
+        
+        # self.idx_in_seq = 0
 
-        # Naming convention for recording sequences of images
-        if self.module_input.record_dataset:
-            if self.idx_in_seq == 0:
-                self.unique_id = random.randint(0, 100_000_000)
-            filename = f'{self.unique_id}_{self.idx_in_seq}'
-            filepath = f'_out/{filename}.png'
-            image.save_to_disk(filepath, cc.Raw)
-            if self.idx_in_seq < SEQ_LEN - 1:
-                self.idx_in_seq += 1
-            else:
-                self.idx_in_seq = 0
-            print(f'[{filename}][{self.simulation_step}] Image saved...')
-        else:
-            self.idx_in_seq = 0
-
-    def maybe_dump_json(self, command, spline):
-        # print(self.simulation_step, 'json')
-        if self.module_input.record_dataset:
-            filename = f'{self.unique_id}_{self.idx_in_seq}'
-            filepath = f'_out/spline/{filename}.json'
-            with open(filepath, 'w') as json_file:
-                json.dump({
-                    'command': command,
-                    'spline': spline
-                }, json_file)
-                print(f'[{filename}][{self.simulation_step}]  JSON saved:', command)
+    def dump_json(self, data, path):
+        with open(path, 'w') as json_file:
+            json.dump(data, json_file)
+            # print(f'[{filename}][{self.simulation_step}]  JSON saved:', command)
 
     def compute_idx_of_best_target(self, route, veh_loc, veh_yaw):
         """
@@ -1028,7 +1011,7 @@ class ModuleWorld(object):
         camera_transform = carla.Transform(carla.Location(x=2.3, z=1.8), carla.Rotation(pitch=-22))
         self.camera = self.world.spawn_actor(camera_bp, camera_transform, attach_to=self.hero_actor)
         print('[GUT] Created %s' % camera_bp)
-        self.camera.listen(lambda image: self.maybe_dump_image(image))
+        self.camera.listen(lambda image: self.process_image(image))
 
         weak_self = weakref.ref(self)
         self.world.on_tick(lambda timestamp: ModuleWorld.on_world_tick(weak_self, timestamp))
@@ -1090,7 +1073,7 @@ class ModuleWorld(object):
 
         waypoint_lookup_range = 2.0
         num_empty_slots = target_plan_length - initial_plan_length
-        print(f'computing next {num_empty_slots} waypoints...')
+        # print(f'computing next {num_empty_slots} waypoints...')
         for _ in range(num_empty_slots):
             last_waypoint = plan[-1][0]
             available_options = last_waypoint.next(waypoint_lookup_range)
@@ -1099,22 +1082,40 @@ class ModuleWorld(object):
             plan.append(new_elem)
         self.global_plan = plan
 
+    def dump_record_to_disk(self, image, command, spline):
+        SEQ_LEN = 10
+
+        # New sequence id
+        if self.idx_in_seq == 0:
+            self.unique_id = random.randint(0, 100_000_000)
+
+        common_filename = f'{self.unique_id}_{self.idx_in_seq}'
+        img_dst_path = f'_out/{common_filename}.png'
+        json_dst_path = f'_out/spline/{common_filename}.json'
+                        
+        self.dump_image(self.last_image, img_dst_path)
+        self.dump_json({'command': command, 'spline': spline}, json_dst_path)
         
+        # Increase frame counter for this sequence
+        if self.idx_in_seq < SEQ_LEN - 1:
+            self.idx_in_seq += 1
+        else:
+            self.idx_in_seq = 0
     def tick(self, clock):
+        # print('World:', self.simulation_step)
         actors = self.world.get_actors()
         self.actors_with_transforms = [(actor, actor.get_transform()) for actor in actors]
         if self.hero_actor is not None:
             self.hero_transform = self.hero_actor.get_transform()
-
-            # 
             self.update_local_plan()
             self.fill_global_plan()
-            
-            #
-            # TODO Use me
-            # control = self.run_step()
-            # apply_control
 
+            spline = []
+            for waypoint, _ in self.local_plan:
+                wp_distance, wp_rel_angle = custom_compute_magnitude_angle(waypoint.transform.location, self.hero_transform.location, self.hero_transform.rotation.yaw)
+                spline.append((wp_distance, wp_rel_angle))
+            if self.module_input.record_dataset:
+                self.dump_record_to_disk(image=self.last_image, command='TODO', spline=spline)
         self.update_hud_info(clock)
 
     def update_hud_info(self, clock):
@@ -1626,10 +1627,9 @@ def game_loop(args):
         clock = pygame.time.Clock()
         while True:
             clock.tick_busy_loop(60)
+            module_manager.tick(clock)
             world_module.world.tick()
             world_module.world.wait_for_tick()
-        
-            module_manager.tick(clock)
             module_manager.render(display)
 
             pygame.display.flip()
