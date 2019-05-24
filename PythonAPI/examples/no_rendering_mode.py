@@ -157,7 +157,13 @@ PIXELS_AHEAD_VEHICLE = 150
 # ==============================================================================
 # -- Util -----------------------------------------------------------
 # ==============================================================================
-
+from itertools import dropwhile
+def rindex(lst, item):
+    index_ne = lambda x: lst[x] != item
+    try:
+        return next(dropwhile(index_ne, reversed(range(len(lst)))))
+    except StopIteration:
+        return -1
 
 def get_actor_display_name(actor, truncate=250):
     name = ' '.join(actor.type_id.replace('_', '.').title().split('.')[1:])
@@ -789,6 +795,9 @@ class ModuleWorld(object):
         self.server_fps = 0.0
         self.simulation_time = 0
         self.step = 0
+        self.idx_in_seq = 0
+        self.img_seq_len = 10
+        self.unique_id = random.randint(0, 10000000)
         self.server_clock = pygame.time.Clock()
 
         # World data
@@ -867,6 +876,7 @@ class ModuleWorld(object):
         # else:
         #     return 'right'
 
+    
     def fill_waypoint_buffer(self):
         target_buffer_size = 40
         reference_waypoint_offset = 6 # How much waypoints ahead of vehicle is our reference waypoint (for calculating intersection command)
@@ -887,6 +897,8 @@ class ModuleWorld(object):
             current_waypoint = self.route[-1][0]
             # print('kontynuuje, bo size jest', initial_buffer_size)
 
+        
+        lane_change_once_every = 20 # route waypoints (every 2.0 meters)
         for _ in range(empty_buffer_slots):
             available_options = current_waypoint.next(waypoint_lookup_range)
             next_waypoint = random.choice(available_options)
@@ -895,33 +907,48 @@ class ModuleWorld(object):
                 command = 'keep_lane'
             else:
                 next_waypoint = random.choice(available_options)
+                # compute command later, when we know spline curvature
                 command = None
+
+            commands_in_route = [cmd for _, cmd in self.route]
+            last_left_change_idx = rindex(commands_in_route, 'lane_change_left')
+            last_right_change_idx = rindex(commands_in_route, 'lane_change_right')
+            last_lane_change_idx = max(last_right_change_idx, last_left_change_idx)
+            if initial_buffer_size - last_lane_change_idx > lane_change_once_every:
+                # Try to change lane
+                left_lane_available = current_waypoint.lane_change & carla.LaneChange.Left
+                right_lane_available = current_waypoint.lane_change & carla.LaneChange.Right
+                if left_lane_available:
+                    left_w = current_waypoint.get_left_lane()
+                    if left_w and left_w.lane_type == carla.LaneType.Driving:
+                        #print(left_w.lane_type, type(left_w.lane_type))
+                        options = left_w.next(2.0)
+                        if options:
+                            command = 'lane_change_left'
+                            next_waypoint = random.choice(options)
+                # Maybe overwrite with right lane change?
+                if right_lane_available:
+                    right_w = current_waypoint.get_right_lane()
+                    if right_w and right_w.lane_type == carla.LaneType.Driving:
+                        options = right_w.next(2.0)
+                        if options and random.randint(0, 1) == 0: # 50% chance to try right
+                            command = 'lane_change_right'
+                            next_waypoint = random.choice(options)
+
             self.route.append((current_waypoint, command))
             current_waypoint = next_waypoint
-
-            # if idx % 60 == 0:
-            #     if current_waypoint.lane_change & carla.LaneChange.Right:
-            #         right_w = current_waypoint.get_right_lane()
-            #         if right_w and right_w.lane_type == carla.LaneType.Driving:
-            #             command = 'lane_change_right'
-            #             next_waypoint = random.choice(right_w.next(2.0))
-
-            #     # check for available left driving lanes
-            #     if current_waypoint.lane_change & carla.LaneChange.Left:
-            #         left_w = current_waypoint.get_left_lane()
-            #         if left_w and left_w.lane_type == carla.LaneType.Driving:
-            #             command = 'lane_change_left'
-            #             next_waypoint = random.choice(left_w.next(2.0))
-
             
             # print(next_waypoint)
             # print(current_waypoint, ' -> ', next_waypoint, ' | command: ', command)
             #endregion
         steps_to_hold_command = 10
+        steps_to_hold_lane_change_command = 4
         # We must correct last few commands in buffer
-        for idx in range(initial_buffer_size - reference_waypoint_offset, target_buffer_size - reference_waypoint_offset):
+        idx = initial_buffer_size - reference_waypoint_offset
+        while idx < target_buffer_size - reference_waypoint_offset:
             waypoint, command = self.route[idx]
             reference_waypoint, _ = self.route[idx + reference_waypoint_offset]
+
             if command is None:
                 # print('znalazlem none na idx', idx)
                 # If there were multiple options to choose from, we must decide now what the command is
@@ -937,16 +964,36 @@ class ModuleWorld(object):
                     # Don't mutate original waypoint data, overwrite command only
                     self.route[neighbour_idx] = self.route[neighbour_idx][0], active_command
                     # print('backtrace, idx=', neighbour_idx, 'to teraz', active_command)
+                    print()
+                idx = neighbour_idx - 1
+            elif command in ['lane_change_left', 'lane_change_right']:
+                # Change name here -> stop infinite reapeating
+                start_idx = idx + 1
+                
+                if command == 'lane_change_left':
+                    new_command_name = 'get_left_lane'
+                else:
+                    new_command_name = 'get_right_lane'
+                self.route[idx] = waypoint, new_command_name
+
+                for neighbour_idx in range(start_idx, min(start_idx + steps_to_hold_lane_change_command, target_buffer_size)):
+                    # Don't mutate original waypoint data, overwrite command only
+                    self.route[neighbour_idx] = self.route[neighbour_idx][0], new_command_name
+                idx = neighbour_idx - 1
+            idx += 1
+        # print([w[1] for w in self.route])
         # print('-----------------')
     def maybe_dump_image(self, image):
         if self.module_input.record_dataset:
-            image.save_to_disk('_out/%06d.png' % image.frame_number, cc.Raw)
+            image.save_to_disk(f'_out/{self.unique_id}_{self.idx_in_seq}.png', cc.Raw) # __frame_{image.frame_number}
 
     def start(self):
         self.world, self.town_map = self._get_data_from_carla()
 
         settings = self.world.get_settings()
         settings.no_rendering_mode = self.args.no_rendering
+        # print('enabling synchronous mode.')
+        settings.synchronous_mode = True
         self.world.apply_settings(settings)
 
         # Create Surfaces
@@ -1041,7 +1088,11 @@ class ModuleWorld(object):
         self.module_input.control = carla.VehicleControl()
 
         weak_self = weakref.ref(self)
-        self.world.on_tick(lambda timestamp: ModuleWorld.on_world_tick(weak_self, timestamp))
+        def _on_tick(timestamp):
+            ModuleWorld.on_world_tick(weak_self, timestamp)
+            self.step = timestamp.frame_count
+            
+        self.world.on_tick(_on_tick)
 
     def select_hero_actor(self):
         hero_vehicles = [actor for actor in self.world.get_actors(
@@ -1129,15 +1180,25 @@ class ModuleWorld(object):
         elif abs(relative_angle) < 20:
             target_speed = 30
         else:
-            target_speed = 27
+            target_speed = 25
+
+        # FIXME Remove this
+        #target_speed -= 5
+
         # print('direction: ', direction)
 
         if self.module_input.record_dataset:
-            filepath = '_out/spline/{:08d}.json'.format(self.step)
+            filename = f'{self.unique_id}_{self.idx_in_seq}' # __frame_{self.step}
+            filepath = f'_out/spline/{filename}.json'
             with open(filepath, 'w') as f:
                 closest_command = self.route[0][1]
                 json.dump(dict(command=closest_command, spline=spline), f)
-                print(f'[{self.step}] Saved:', closest_command)
+                print(f'[{filename}][{self.step}] Saved:', closest_command)
+            if self.idx_in_seq < self.img_seq_len - 1:
+                self.idx_in_seq += 1
+            else:
+                self.idx_in_seq = 0
+                self.unique_id = random.randint(0, 10000000)
 
         # MICZI
         # print('Relative angle to reference waypoint: {:3d} | Vehicle yaw angle: {:3d} | Target speed {} km/h'.format(
@@ -1145,6 +1206,10 @@ class ModuleWorld(object):
         # ))
 
         control = self.vehicle_controller.run_step(target_speed, target_waypoint)
+        # FIXME uncomment
+        # _, command = self.route[1]
+        # if command in ['get_left_lane', 'get_right_lane'] and get_speed(self.hero_actor) > 25:
+        #     control.brake = 0.4
         return control
 
     def tick(self, clock):
@@ -1163,8 +1228,14 @@ class ModuleWorld(object):
             else:
                 self.frames_since_stuck = 0
             
-            if self.frames_since_stuck > 60 and self.module_input.record_dataset:
+            if self.frames_since_stuck > 30 and self.module_input.record_dataset:
                 # Stop executing when stuck
+                # self.route = []
+                # spawn_points = self.world.get_map().get_spawn_points()
+                # spawn_point = random.choice(spawn_points) if spawn_points else carla.Transform()
+                # self.hero_actor.set_transform(spawn_point)
+                # self.fill_waypoint_buffer()
+
                 print('Exiting, restart simulator because car has stuck!')
                 exit(1)
             
@@ -1243,7 +1314,7 @@ class ModuleWorld(object):
         self.server_clock.tick()
         self.server_fps = self.server_clock.get_fps()
         self.simulation_time = timestamp.elapsed_seconds
-        self.step = timestamp.frame_count
+        # self.step = timestamp.frame_count
 
     def _split_actors(self):
         vehicles = []
@@ -1391,9 +1462,10 @@ class ModuleWorld(object):
 
     def render_actors(self, surface, vehicles, traffic_lights, speed_limits, walkers):
         # Static actors
+        # FIXME UNCOMMENT
         self._render_traffic_lights(surface, [tl[0] for tl in traffic_lights], self.map_image.world_to_pixel)
         self._render_speed_limits(surface, [sl[0] for sl in speed_limits], self.map_image.world_to_pixel,
-                                  self.map_image.world_to_pixel_width)
+                                 self.map_image.world_to_pixel_width)
 
         # Dynamic actors
         self._render_vehicles(surface, vehicles, self.map_image.world_to_pixel)
@@ -1535,6 +1607,7 @@ class ModuleInput(object):
         self.control = None
         self._autopilot_enabled = False
         self.record_dataset = False
+        self.gut_autopilot = False
 
     def start(self):
         hud = module_manager.get_module(MODULE_HUD)
@@ -1595,10 +1668,10 @@ class ModuleInput(object):
                     elif event.key == K_p:
                         world = module_manager.get_module(MODULE_WORLD)
                         if world.hero_actor is not None:
-                            self._autopilot_enabled = not self._autopilot_enabled
-                            world.hero_actor.set_autopilot(self._autopilot_enabled)
+                            self.gut_autopilot = not self.gut_autopilot
+                            #world.hero_actor.set_autopilot(self._autopilot_enabled)
                             module_hud = module_manager.get_module(MODULE_HUD)
-                            module_hud.notification('Autopilot %s' % ('On' if self._autopilot_enabled else 'Off'))
+                            module_hud.notification('GUT Autopilot %s' % ('On' if self.gut_autopilot else 'Off'))
                     elif event.key == K_r:
                         world = module_manager.get_module(MODULE_WORLD)
                         if world.hero_actor is not None:
@@ -1646,7 +1719,7 @@ class ModuleInput(object):
                 self.control.reverse = self.control.gear < 0
             world = module_manager.get_module(MODULE_WORLD)
             # MICZI
-            if world.hero_actor is not None and self.record_dataset is False:
+            if world.hero_actor is not None and self.gut_autopilot is False:
                 world.hero_actor.apply_control(self.control)
 
     @staticmethod
@@ -1705,7 +1778,12 @@ def game_loop(args):
 
     finally:
         if world_module is not None:
+            # print('disabling synchronous mode.')
+            settings = world_module.world.get_settings()
+            settings.synchronous_mode = False
+            world_module.world.apply_settings(settings)
             world_module.destroy()
+        
 
 def exit_game():
     module_manager.clear_modules()
