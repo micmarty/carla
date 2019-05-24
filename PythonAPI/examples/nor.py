@@ -885,7 +885,7 @@ class ModuleWorld(object):
 
         settings = self.world.get_settings()
         settings.no_rendering_mode = self.args.no_rendering
-        # settings.synchronous_mode = True
+        settings.synchronous_mode = self.args.synchronous_mode
         self.world.apply_settings(settings)
 
         # Create Surfaces
@@ -1517,6 +1517,10 @@ def main():
         '--no-rendering',
         action='store_true',
         help='switch off server rendering')
+    argparser.add_argument(
+        '--synchronous',
+        action='store_true',
+        dest='synchronous_mode')
     argparser.add_argument(
         '--show-triggers',
         action='store_true',
