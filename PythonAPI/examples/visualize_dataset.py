@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import json
 import os
+import random
 command = None
 def load_spline(path: Path) -> np.ndarray:
     """Spline is reshaped from (7,2) -> (14, 1).
@@ -36,9 +37,9 @@ if __name__ == '__main__':
 
     all_img_paths = glob.glob("E:\\mycarla\\PythonAPI\\examples\\_out\\*.png")
     idx = 0
-    start_idx = 8000
-    end_idx = 10000
-    for img_path in sorted(all_img_paths, key=os.path.getctime)[start_idx:end_idx]:
+    start_idx = 0
+    end_idx = 6000
+    for img_path in sorted(all_img_paths, key=os.path.getctime): # [start_idx:end_idx]
         print('Loading: ', idx, '/', end_idx - start_idx)
         try:
             filename = Path(img_path).with_suffix('.json').name
@@ -48,8 +49,8 @@ if __name__ == '__main__':
             img = mpimg.imread(img_path)
             img_plot = plt.imshow(img, animated=True)
 
-            rel_angles = spline[7:10] * scale + horizontal_offset
-            distances = vertical_offset - spline[:3] * scale
+            rel_angles = spline[7:14] * scale + horizontal_offset
+            distances = vertical_offset - spline[:7] * scale
             spline_plot, = plt.plot(rel_angles, distances, '.-r', animated=True)
             command_title = plt.text(224/3, 200, command, fontsize=16)
             file_title = plt.text(224/3, 30, filename, fontsize=10, color='w')
@@ -62,7 +63,10 @@ if __name__ == '__main__':
             pass
         
 
-    ani = animation.ArtistAnimation(fig, plots, interval=300, blit=True)
+    ani = animation.ArtistAnimation(fig, plots, interval=100, blit=True)
     # conda install -c conda-forge ffmpeg
-    # ani.save('clip.mp4')
+    print('Exporting clip...')
+    ani.save(f'clip_sync_{random.randint(0,999)}.mp4')
+    print('Done exporting clip...')
+    print('Rendering plot...')
     plt.show()
