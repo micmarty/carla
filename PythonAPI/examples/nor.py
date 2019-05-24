@@ -52,6 +52,11 @@ except IndexError:
 
 import carla
 from carla import TrafficLightState as tls
+# GUT imports
+import json
+from carla import ColorConverter as cc
+sys.path.append(glob.glob('../carla')[0]) # agents
+from agents.tools.misc import draw_waypoints, distance_vehicle
 
 import argparse
 import logging
@@ -84,6 +89,8 @@ try:
     from pygame.locals import K_q
     from pygame.locals import K_s
     from pygame.locals import K_w
+    from pygame.locals import K_r
+    from pygame.locals import K_g
 except ImportError:
     raise RuntimeError('cannot import pygame, make sure pygame package is installed')
 
@@ -864,6 +871,14 @@ class ModuleWorld(object):
         self.hero_surface = None
         self.actors_surface = None
 
+        # GUT recording
+        self.camera = None
+        self.idx_in_seq = 0
+        self.unique_id = None
+
+        # GUT spline
+        self.global_plan = []
+
     def _get_data_from_carla(self):
         try:
             self.client = carla.Client(self.args.host, self.args.port)
@@ -881,6 +896,75 @@ class ModuleWorld(object):
             logging.error(ex)
             exit_game()
 
+
+    def maybe_dump_image(self, image):
+        # GUT Recording images from RGB camera 
+        SEQ_LEN = 10
+        # print(self.simulation_step, 'image')
+
+        # Naming convention for recording sequences of images
+        if self.module_input.record_dataset:
+            if self.idx_in_seq == 0:
+                self.unique_id = random.randint(0, 100_000_000)
+            filename = f'{self.unique_id}_{self.idx_in_seq}'
+            filepath = f'_out/{filename}.png'
+            image.save_to_disk(filepath, cc.Raw)
+            if self.idx_in_seq < SEQ_LEN - 1:
+                self.idx_in_seq += 1
+            else:
+                self.idx_in_seq = 0
+            print(f'[{filename}][{self.simulation_step}] Image saved...')
+        else:
+            self.idx_in_seq = 0
+
+    def maybe_dump_json(self, command, spline):
+        # print(self.simulation_step, 'json')
+        if self.module_input.record_dataset:
+            filename = f'{self.unique_id}_{self.idx_in_seq}'
+            filepath = f'_out/spline/{filename}.json'
+            with open(filepath, 'w') as json_file:
+                json.dump({
+                    'command': command,
+                    'spline': spline
+                }, json_file)
+                print(f'[{filename}][{self.simulation_step}]  JSON saved:', command)
+
+    def compute_idx_of_best_target(self, route, veh_loc, veh_yaw):
+        """
+        route: list of tuples (waypoint, command)
+        returns: index of route element which has lowest distance cost
+        """
+        RANGE = 7
+        VEH_LEN = 2.9
+        fx = veh_location.x + VEH_LEN * np.cos(veh_yaw)
+        fy = veh_location.y + VEH_LEN * np.sin(veh_yaw)
+
+        distances = []
+        spline = []
+        for waypoint, _ in self.route[:RANGE]:
+            wp_loc = waypoint.transform.location
+            dx = fx - wp_loc.x
+            dy = fy - wp_loc.y
+            distance = np.sqrt(dx ** 2 + dy ** 2)
+            distances.append(distance)
+        target_idx = np.argmin(distances)
+        #closest_error = distances[target_idx]
+        return target_idx
+
+    # def run_step(self):
+    #     veh_loc = self.hero_transform.location
+    #     veh_yaw = self.hero_transform.rotation.yaw
+
+    #     target_idx = self.compute_idx_of_best_target(self.route, veh_loc, veh_yaw)
+
+    #     command = 'TODO'
+    #     spline = [(), (), ()]
+    #     self.maybe_dump_json(command, spline)
+
+    #     calculated_control = self.vehicle_controller.run_step(target_speed, target_waypoint)
+    #     return calculated_control
+    
+    # 
     def start(self):
         self.world, self.town_map = self._get_data_from_carla()
 
@@ -935,6 +1019,17 @@ class ModuleWorld(object):
         self.module_input.wheel_offset = HERO_DEFAULT_SCALE
         self.module_input.control = carla.VehicleControl()
 
+        # GUT Initialize camera
+        self.module_input.record_dataset = self.args.record_dataset
+        camera_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
+        camera_bp.set_attribute('image_size_x', '224')
+        camera_bp.set_attribute('image_size_y', '224')
+        camera_bp.set_attribute('fov', '120')
+        camera_transform = carla.Transform(carla.Location(x=2.3, z=1.8), carla.Rotation(pitch=-22))
+        self.camera = self.world.spawn_actor(camera_bp, camera_transform, attach_to=self.hero_actor)
+        print('[GUT] Created %s' % camera_bp)
+        self.camera.listen(lambda image: self.maybe_dump_image(image))
+
         weak_self = weakref.ref(self)
         self.world.on_tick(lambda timestamp: ModuleWorld.on_world_tick(weak_self, timestamp))
 
@@ -964,11 +1059,62 @@ class ModuleWorld(object):
         # Save it in order to destroy it when closing program
         self.spawned_hero = self.hero_actor
 
+    def update_local_plan(self, horizon: float = 2.0):
+        """Seeks for closest waypoints in global_plan (within horizon).
+        It will removes all elements that have been passed by vehicle.
+        """
+        max_dist_idx = -1
+        for idx, elem in enumerate(self.local_plan):
+            waypoint, command = elem
+            distance_from_veh = distance_vehicle(waypoint, self.hero_transform)
+            if distance_from_veh < horizon:
+                max_dist_idx = idx
+        if max_dist_idx >= 0:
+            self.global_plan = self.global_plan[max_dist_idx + 1:]
+
+    @property
+    def local_plan(self):
+        return self.global_plan[:7]
+
+    def fill_global_plan(self):
+        plan = self.global_plan
+
+        target_plan_length = 20
+        initial_plan_length = len(plan)
+        if initial_plan_length > (target_plan_length / 2):
+            return
+        if initial_plan_length == 0:
+            veh_loc = self.hero_actor.get_location()
+            veh_wp = self.world.get_map().get_waypoint(veh_loc)
+            plan = [(veh_wp, 1)]
+
+        waypoint_lookup_range = 2.0
+        num_empty_slots = target_plan_length - initial_plan_length
+        print(f'computing next {num_empty_slots} waypoints...')
+        for _ in range(num_empty_slots):
+            last_waypoint = plan[-1][0]
+            available_options = last_waypoint.next(waypoint_lookup_range)
+            next_waypoint = random.choice(available_options)
+            new_elem = (next_waypoint, len(available_options))
+            plan.append(new_elem)
+        self.global_plan = plan
+
+        
     def tick(self, clock):
         actors = self.world.get_actors()
         self.actors_with_transforms = [(actor, actor.get_transform()) for actor in actors]
         if self.hero_actor is not None:
             self.hero_transform = self.hero_actor.get_transform()
+
+            # 
+            self.update_local_plan()
+            self.fill_global_plan()
+            
+            #
+            # TODO Use me
+            # control = self.run_step()
+            # apply_control
+
         self.update_hud_info(clock)
 
     def update_hud_info(self, clock):
@@ -1142,7 +1288,6 @@ class ModuleWorld(object):
             pygame.draw.polygon(surface, color, corners)
 
     def _render_vehicles(self, surface, list_v, world_to_pixel):
-
         for v in list_v:
             color = COLOR_SKY_BLUE_0
             if int(v[0].attributes['number_of_wheels']) == 2:
@@ -1162,16 +1307,22 @@ class ModuleWorld(object):
             corners = [world_to_pixel(p) for p in corners]
             pygame.draw.lines(surface, color, False, corners, int(math.ceil(4.0 * self.map_image.scale)))
 
+    def _render_waypoints(self, surface, waypoints, color, world_to_pixel, world_to_pixel_width):
+        # GUT Draw local plan
+        radius = world_to_pixel_width(0.3)
+        for w, command in waypoints:
+            x, y = world_to_pixel(w.transform.location)
+            pygame.draw.circle(surface, color, (x, y), radius)
+
     def render_actors(self, surface, vehicles, traffic_lights, speed_limits, walkers):
-        print(self.simulation_step)
         # Static actors
         self._render_traffic_lights(surface, [tl[0] for tl in traffic_lights], self.map_image.world_to_pixel)
-        self._render_speed_limits(surface, [sl[0] for sl in speed_limits], self.map_image.world_to_pixel,
-                                  self.map_image.world_to_pixel_width)
+        self._render_speed_limits(surface, [sl[0] for sl in speed_limits], self.map_image.world_to_pixel, self.map_image.world_to_pixel_width)
 
         # Dynamic actors
         self._render_vehicles(surface, vehicles, self.map_image.world_to_pixel)
         self._render_walkers(surface, walkers, self.map_image.world_to_pixel)
+        self._render_waypoints(surface, self.local_plan, COLOR_SCARLET_RED_1, self.map_image.world_to_pixel, self.map_image.world_to_pixel_width)
 
     def clip_surfaces(self, clipping_rect):
         self.actors_surface.set_clip(clipping_rect)
@@ -1305,10 +1456,15 @@ class ModuleInput(object):
         self._steer_cache = 0.0
         self.control = None
         self._autopilot_enabled = False
+        # GUT Keybindings
+        self.record_dataset = False # R key
+        self.gut_autopilot = False # G key
 
     def start(self):
-        hud = module_manager.get_module(MODULE_HUD)
-        hud.notification("Press 'H' or '?' for help.", seconds=4.0)
+        pass
+        # GUT Useless
+        # hud = module_manager.get_module(MODULE_HUD)
+        # hud.notification("Press 'H' or '?' for help.", seconds=4.0)
 
     def render(self, display):
         pass
@@ -1369,6 +1525,19 @@ class ModuleInput(object):
                             world.hero_actor.set_autopilot(self._autopilot_enabled)
                             module_hud = module_manager.get_module(MODULE_HUD)
                             module_hud.notification('Autopilot %s' % ('On' if self._autopilot_enabled else 'Off'))
+                    elif event.key == K_r:
+                        # GUT Record dataset binding
+                        world = module_manager.get_module(MODULE_WORLD)
+                        if world.hero_actor:
+                            self.record_dataset = not self.record_dataset
+                            module_hud = module_manager.get_module(MODULE_HUD)
+                            module_hud.notification('GUT Recording %s' % ('On' if self.record_dataset else 'Off'))
+                    elif event.key == K_g:
+                        world = module_manager.get_module(MODULE_WORLD)
+                        if world.hero_actor:
+                            self.gut_autopilot = not self.gut_autopilot
+                            module_hud = module_manager.get_module(MODULE_HUD)
+                            module_hud.notification('GUT Autopilot %s' % ('On' if self.gut_autopilot else 'Off'))
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 4:
                     self.wheel_offset += self.wheel_amount
@@ -1511,7 +1680,7 @@ def main():
     argparser.add_argument(
         '--filter',
         metavar='PATTERN',
-        default='vehicle.*',
+        default='vehicle.lincoln.mkz2017',
         help='actor filter (default: "vehicle.*")')
     argparser.add_argument(
         '--map',
@@ -1522,6 +1691,12 @@ def main():
         '--no-rendering',
         action='store_true',
         help='switch off server rendering')
+    argparser.add_argument(
+        '--record-dataset',
+        action='store_true')
+    argparser.add_argument(
+        '--gut-autopilot',
+        action='store_true')
     argparser.add_argument(
         '--synchronous',
         action='store_true',
