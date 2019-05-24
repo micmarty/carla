@@ -830,6 +830,7 @@ class ModuleWorld(object):
         self.timeout = timeout
         self.server_fps = 0.0
         self.simulation_time = 0
+        self.simulation_step = 0
         self.server_clock = pygame.time.Clock()
 
         # World data
@@ -1023,6 +1024,7 @@ class ModuleWorld(object):
         self.server_clock.tick()
         self.server_fps = self.server_clock.get_fps()
         self.simulation_time = timestamp.elapsed_seconds
+        self.simulation_step = timestamp.frame_count
 
     def _split_actors(self):
         vehicles = []
@@ -1161,14 +1163,15 @@ class ModuleWorld(object):
             pygame.draw.lines(surface, color, False, corners, int(math.ceil(4.0 * self.map_image.scale)))
 
     def render_actors(self, surface, vehicles, traffic_lights, speed_limits, walkers):
+        print(self.simulation_step)
         # Static actors
-        # self._render_traffic_lights(surface, [tl[0] for tl in traffic_lights], self.map_image.world_to_pixel)
-        # self._render_speed_limits(surface, [sl[0] for sl in speed_limits], self.map_image.world_to_pixel,
-        #                           self.map_image.world_to_pixel_width)
+        self._render_traffic_lights(surface, [tl[0] for tl in traffic_lights], self.map_image.world_to_pixel)
+        self._render_speed_limits(surface, [sl[0] for sl in speed_limits], self.map_image.world_to_pixel,
+                                  self.map_image.world_to_pixel_width)
 
         # Dynamic actors
         self._render_vehicles(surface, vehicles, self.map_image.world_to_pixel)
-        # self._render_walkers(surface, walkers, self.map_image.world_to_pixel)
+        self._render_walkers(surface, walkers, self.map_image.world_to_pixel)
 
     def clip_surfaces(self, clipping_rect):
         self.actors_surface.set_clip(clipping_rect)
@@ -1454,7 +1457,9 @@ def game_loop(args):
         clock = pygame.time.Clock()
         while True:
             clock.tick_busy_loop(60)
-
+            world_module.world.tick()
+            world_module.world.wait_for_tick()
+        
             module_manager.tick(clock)
             module_manager.render(display)
 
