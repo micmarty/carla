@@ -57,6 +57,8 @@ import json
 from carla import ColorConverter as cc
 sys.path.append(glob.glob('../carla')[0]) # agents
 from agents.tools.misc import draw_waypoints, distance_vehicle, custom_compute_magnitude_angle
+from agents.navigation.controller import VehiclePIDController
+import numpy as np
 
 import argparse
 import logging
@@ -873,7 +875,7 @@ class ModuleWorld(object):
 
         # GUT recording
         self.camera = None
-        self.last_image = None
+        self.last_image = -1
         self.idx_in_seq = 0
         self.unique_id = None
 
@@ -898,8 +900,11 @@ class ModuleWorld(object):
             exit_game()
 
     def process_image(self, image):
-        self.last_image = image
-        # print('Image:', image.frame_number)
+        if self.last_image == -1:
+            self.last_image = None
+        else:
+            self.last_image = image
+            print('Image:', image.frame_number)
 
     def dump_image(self, image, path):
         image.save_to_disk(path, cc.Raw)
@@ -912,19 +917,19 @@ class ModuleWorld(object):
             json.dump(data, json_file)
             # print(f'[{filename}][{self.simulation_step}]  JSON saved:', command)
 
-    def compute_idx_of_best_target(self, route, veh_loc, veh_yaw):
+    def compute_idx_of_best_target(self, plan, veh_loc, veh_yaw):
         """
         route: list of tuples (waypoint, command)
         returns: index of route element which has lowest distance cost
         """
         RANGE = 7
         VEH_LEN = 2.9
-        fx = veh_location.x + VEH_LEN * np.cos(veh_yaw)
-        fy = veh_location.y + VEH_LEN * np.sin(veh_yaw)
+        fx = veh_loc.x + VEH_LEN * np.cos(veh_yaw)
+        fy = veh_loc.y + VEH_LEN * np.sin(veh_yaw)
 
         distances = []
         spline = []
-        for waypoint, _ in self.route[:RANGE]:
+        for waypoint, _ in plan[:RANGE]:
             wp_loc = waypoint.transform.location
             dx = fx - wp_loc.x
             dy = fy - wp_loc.y
@@ -1013,6 +1018,12 @@ class ModuleWorld(object):
         print('[GUT] Created %s' % camera_bp)
         self.camera.listen(lambda image: self.process_image(image))
 
+        # GUT Autopilot
+        dt = 1.0/5.0
+        args_lateral_dict = {'K_P': .5, 'K_I': 0.4, 'K_D': 0.01, 'dt': dt}
+        args_longitudinal_dict = {'K_P': 0.2, 'K_I': 0.0258, 'K_D': 0.014, 'dt': dt}
+        self.gut_controller = VehiclePIDController(self.hero_actor, args_lateral=args_lateral_dict, args_longitudinal=args_longitudinal_dict)
+
         weak_self = weakref.ref(self)
         self.world.on_tick(lambda timestamp: ModuleWorld.on_world_tick(weak_self, timestamp))
 
@@ -1066,6 +1077,7 @@ class ModuleWorld(object):
         initial_plan_length = len(plan)
         if initial_plan_length > (target_plan_length / 2):
             return
+
         if initial_plan_length == 0:
             veh_loc = self.hero_actor.get_location()
             veh_wp = self.world.get_map().get_waypoint(veh_loc)
@@ -1101,20 +1113,35 @@ class ModuleWorld(object):
             self.idx_in_seq += 1
         else:
             self.idx_in_seq = 0
+    
+    def compute_spline_from_local_plan(self):
+        spline = []
+        for waypoint, _ in self.local_plan:
+            wp_distance, wp_rel_angle = custom_compute_magnitude_angle(waypoint.transform.location, self.hero_transform.location, self.hero_transform.rotation.yaw)
+            spline.append((wp_distance, wp_rel_angle))
+        return spline
+
     def tick(self, clock):
-        # print('World:', self.simulation_step)
+        print('World:', self.simulation_step)
         actors = self.world.get_actors()
         self.actors_with_transforms = [(actor, actor.get_transform()) for actor in actors]
         if self.hero_actor is not None:
             self.hero_transform = self.hero_actor.get_transform()
+
+            # Keep plan up-to-date 
             self.update_local_plan()
             self.fill_global_plan()
+            
+            # GUT Autopilot
+            target_speed = 30
+            best_idx = self.compute_idx_of_best_target(self.local_plan, self.hero_transform.location, self.hero_transform.rotation.yaw)
+            target_waypoint, _ = self.local_plan[best_idx]
+            control = self.gut_controller.run_step(target_speed, target_waypoint)
+            self.hero_actor.apply_control(control)
 
-            spline = []
-            for waypoint, _ in self.local_plan:
-                wp_distance, wp_rel_angle = custom_compute_magnitude_angle(waypoint.transform.location, self.hero_transform.location, self.hero_transform.rotation.yaw)
-                spline.append((wp_distance, wp_rel_angle))
+            # GUT Dataset recorder: image + command + spline
             if self.module_input.record_dataset:
+                spline = self.compute_spline_from_local_plan()
                 self.dump_record_to_disk(image=self.last_image, command='TODO', spline=spline)
         self.update_hud_info(clock)
 
@@ -1579,7 +1606,7 @@ class ModuleInput(object):
                 self._parse_keys(clock.get_time())
                 self.control.reverse = self.control.gear < 0
             world = module_manager.get_module(MODULE_WORLD)
-            if (world.hero_actor is not None):
+            if world.hero_actor and not self.gut_autopilot:
                 world.hero_actor.apply_control(self.control)
 
     @staticmethod
@@ -1625,15 +1652,16 @@ def game_loop(args):
         module_manager.start_modules()
 
         clock = pygame.time.Clock()
+        world_module.world.tick()
         while True:
             clock.tick_busy_loop(60)
             module_manager.tick(clock)
+
             world_module.world.tick()
             world_module.world.wait_for_tick()
+
             module_manager.render(display)
-
             pygame.display.flip()
-
     except KeyboardInterrupt:
         print('\nCancelled by user. Bye!')
 
