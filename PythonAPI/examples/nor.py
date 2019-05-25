@@ -56,7 +56,7 @@ from carla import TrafficLightState as tls
 import json
 from carla import ColorConverter as cc
 sys.path.append(glob.glob('../carla')[0]) # agents
-from agents.tools.misc import draw_waypoints, distance_vehicle, custom_compute_magnitude_angle, compute_magnitude_angle
+from agents.tools.misc import draw_waypoints, distance_vehicle, custom_compute_magnitude_angle, compute_magnitude_angle, OptionDecision, get_speed
 from agents.navigation.controller import VehiclePIDController
 import numpy as np
 
@@ -883,6 +883,8 @@ class ModuleWorld(object):
         self.global_plan = []
         self.locked_command = 'keep_lane'
         self.hold_straight_counter = 0
+        self.steps_since_last_lane_change = -1
+        self.target_lane_id = None
 
     def _get_data_from_carla(self):
         try:
@@ -1055,7 +1057,7 @@ class ModuleWorld(object):
         # Save it in order to destroy it when closing program
         self.spawned_hero = self.hero_actor
 
-    def update_local_plan(self, horizon: float = 2.0):
+    def update_local_plan(self, horizon: float = 5.0):
         """Seeks for closest waypoints in global_plan (within horizon).
         It will removes all elements that have been passed by vehicle.
         """
@@ -1071,6 +1073,21 @@ class ModuleWorld(object):
     @property
     def local_plan(self):
         return self.global_plan[:7]
+
+    def get_lane_waypoint(self, side: str, from_wp, distance: float=4.0):
+        """side: 'left' or 'right
+        Returns waypoint or None
+        """
+        lane_flag = carla.LaneChange.Left if side=='left' else carla.LaneChange.Right
+        is_lane_available = from_wp.lane_change & lane_flag
+        
+        if is_lane_available:
+            wp_on_lane = from_wp.get_left_lane() if side=='left' else from_wp.get_right_lane()
+            if wp_on_lane and wp_on_lane.lane_type == carla.LaneType.Driving:
+                available_options = wp_on_lane.next(distance)
+                if available_options:
+                    return random.choice(available_options)
+        return None
 
     def fill_global_plan(self):
         plan = self.global_plan
@@ -1091,8 +1108,43 @@ class ModuleWorld(object):
         for _ in range(num_empty_slots):
             last_waypoint = plan[-1][0]
             available_options = last_waypoint.next(waypoint_lookup_range)
-            next_waypoint = random.choice(available_options)
-            new_elem = (next_waypoint, len(available_options))
+
+            if last_waypoint.is_intersection:
+                # Reset counter -> prevents immediate lane change after intersection
+                self.steps_since_last_lane_change = -1
+
+            # Must keep the lane
+            if len(available_options) == 1:
+                # Maybe lane change is possible, check and overwrite if yes
+                
+                if self.steps_since_last_lane_change > (3 * 7): # How often try changing lanes
+                    left_wp = self.get_lane_waypoint(side='left', from_wp=last_waypoint)
+                    right_wp = self.get_lane_waypoint(side='right', from_wp=last_waypoint)
+                    if left_wp and right_wp:
+                        # Choose randomly if both available
+                        next_waypoint = random.choice([left_wp, right_wp])
+                        wp_command_descriptor = OptionDecision.CHANGE_LANE
+                        self.steps_since_last_lane_change = -1
+                    elif left_wp or right_wp:
+                        # Pick first which is not None
+                        next_waypoint = left_wp or right_wp
+                        wp_command_descriptor = OptionDecision.CHANGE_LANE
+                        self.steps_since_last_lane_change = -1
+                    else:
+                        # Both are inaccessible, so keep lane
+                        next_waypoint = available_options[0]
+                        wp_command_descriptor = OptionDecision.KEEP_LANE
+                        self.steps_since_last_lane_change += 1
+                else:
+                    # Can't change lane because of counter, keep lane
+                    next_waypoint = available_options[0]
+                    wp_command_descriptor = OptionDecision.KEEP_LANE
+                    self.steps_since_last_lane_change += 1
+            else:
+                # There are multiple route choices, pick one at random
+                next_waypoint = random.choice(available_options)
+                wp_command_descriptor = OptionDecision.SPECIFIC_DIRECTION
+            new_elem = (next_waypoint, wp_command_descriptor)
             plan.append(new_elem)
         self.global_plan = plan
 
@@ -1124,14 +1176,17 @@ class ModuleWorld(object):
         return spline
 
 
-    def yaw_diff(self, start_waypoint, target_waypoint):
-        n = start_waypoint.transform.rotation.yaw
+    def abs_yaw_diff(self, start_transform, target_waypoint):
+        n = start_transform.rotation.yaw
         n = n % 360.0
 
         c = target_waypoint.transform.rotation.yaw
         c = c % 360.0
 
-        diff_angle = (n - c) % 180.0
+        if n >= c:
+            diff_angle = (n - c) % 180.0
+        else:
+            diff_angle = (c - n) % 180.0
         return diff_angle
 
     def tick(self, clock):
@@ -1145,8 +1200,11 @@ class ModuleWorld(object):
             self.update_local_plan()
             self.fill_global_plan()
 
-            ref_wp, num_options_future = self.local_plan[-1]
+            ref_wp, ref_wp_descriptor = self.local_plan[-1]
             ref_to_ref_wp = self.global_plan[2 * 7][0]  # Yet another reference waypoint
+            # car_ref_yaw_diff = self.abs_yaw_diff(self.hero_transform, ref_wp)
+            closest_wp = self.local_plan[0][0]
+            # print("YAW", car_ref_yaw_diff)
             # car ---7 waypoints ---> car_to_ref_rel_angle ---7 waypoints ---> ref_to_double_ref_rel_angle
             _, car_to_ref_rel_angle = compute_magnitude_angle(ref_wp.transform.location, self.hero_transform.location, self.hero_transform.rotation.yaw)
             try:
@@ -1161,7 +1219,9 @@ class ModuleWorld(object):
                 ref_to_double_ref_rel_angle = 0
 
             turn_angle_threshold = 6
-            if num_options_future > 1:
+            
+            # Multiple options were available
+            if ref_wp_descriptor is OptionDecision.SPECIFIC_DIRECTION:
                 # Point of decision is ahead
                 if ref_to_double_ref_rel_angle <= -turn_angle_threshold:
                     command = 'left'
@@ -1169,9 +1229,10 @@ class ModuleWorld(object):
                     command = 'right'
                 else:
                     command = 'straight'
-                print('choosing', command)
+                # print('choosing', command)
                 self.locked_command = command
-            else:
+            # One one option was available
+            elif ref_wp_descriptor is OptionDecision.KEEP_LANE:
                 # Only one option is ahead of us
 
                 # If we were turning, but now angle to ref is small
@@ -1179,8 +1240,14 @@ class ModuleWorld(object):
                     # Reset state, route curvature is smooth again
                     command = 'keep_lane'
                     self.locked_command = 'keep_lane'
+                elif self.locked_command in ['get_left_lane', 'get_right_lane'] and closest_wp.lane_id == self.target_lane_id:
+                    # Reset state, reached targeted lane
+                    command = 'keep_lane'
+                    self.locked_command = 'keep_lane'
+                    # print(f'resetting, lane {self.target_lane_id} reached')
+                    self.target_lane_id = None
                 elif self.locked_command == 'straight':
-                    if self.hold_straight_counter > 14:
+                    if self.hold_straight_counter > 3 * 7:
                         command = 'keep_lane'
                         self.locked_command = 'keep_lane'
                         self.hold_straight_counter = 0
@@ -1190,15 +1257,54 @@ class ModuleWorld(object):
                         self.hold_straight_counter += 1
                 else:
                     command = self.locked_command
+            # Lane change was planned
+            elif ref_wp_descriptor is OptionDecision.CHANGE_LANE:
+                # Actually ref_wp is already on target lane, so we must pick its predecessor from current lane
+                ref_wp = self.local_plan[-2][0]
+                # print(f'current lane: {ref_wp.lane_id} | target lane {ref_to_ref_wp.lane_id}')
+                if ref_wp.lane_id != ref_to_ref_wp.lane_id:
+                    _, old_to_new_lane_rel_angle = custom_compute_magnitude_angle(ref_to_ref_wp.transform.location, ref_wp.transform.location, ref_wp.transform.rotation.yaw)
+                    # print('ref 2 refref angle:', int(old_to_new_lane_rel_angle))
+                    if old_to_new_lane_rel_angle <= -turn_angle_threshold:
+                        command = 'get_left_lane'
+                    elif old_to_new_lane_rel_angle >= turn_angle_threshold:
+                        command = 'get_right_lane'
+                    else:
+                        # FIXME
+                        command = 'get_right_lane'
+                        print('BROKEN?')
+                    self.target_lane_id = ref_to_ref_wp.lane_id
+                else:
+                    command = 'keep_lane'
+                self.locked_command = command
+            else:
+                # Place for extensions here...
+                pass
             # command = self.locked_command or command
                 # ref_after_ref_wp = self.global_plan[idx * 2][0]
                 # if self.yaw_diff(ref_wp, ref_after_ref_wp]) > 10.0:
 
             # self.module_hud.notification(command, seconds=1.0)
-            print(command, int(car_to_ref_rel_angle), int(ref_to_double_ref_rel_angle))
+            # print(command, int(car_to_ref_rel_angle), int(ref_to_double_ref_rel_angle))
             # GUT Autopilot
-            target_speed = 30
+            
+            if abs(car_to_ref_rel_angle) <= turn_angle_threshold:
+                target_speed = self.hero_actor.get_speed_limit()
+            elif abs(car_to_ref_rel_angle) <= 2 * turn_angle_threshold:
+                target_speed = 30
+            elif abs(car_to_ref_rel_angle) <= 4 * turn_angle_threshold:
+                target_speed = 25
+            else:
+                target_speed = 20
+            print(target_speed)
             best_idx = self.compute_idx_of_best_target(self.local_plan, self.hero_transform.location, self.hero_transform.rotation.yaw)
+
+            # Focus last waypoint in plan when performing lane change
+            if command in ['get_left_lane', 'get_right_lane']:
+                best_idx = max(best_idx, len(self.local_plan) // 2 + 1)
+            # print("Best idx", best_idx)
+
+            # TRASH
             target_waypoint, _ = self.local_plan[best_idx]
             control = self.gut_controller.run_step(target_speed, target_waypoint)
             self.hero_actor.apply_control(control)

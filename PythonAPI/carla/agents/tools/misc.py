@@ -13,7 +13,12 @@ import math
 import numpy as np
 
 import carla
+from enum import Enum
 
+class OptionDecision(Enum):
+    CHANGE_LANE = 0
+    KEEP_LANE = 1
+    SPECIFIC_DIRECTION = 2
 
 def draw_waypoints(world, waypoints, z=0.5):
     """
