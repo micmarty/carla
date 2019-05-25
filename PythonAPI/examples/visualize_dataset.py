@@ -65,8 +65,9 @@ if __name__ == '__main__':
 
     ani = animation.ArtistAnimation(fig, plots, interval=100, blit=True)
     # conda install -c conda-forge ffmpeg
-    print('Exporting clip...')
-    ani.save(f'clip_sync_{random.randint(0,999)}.mp4')
-    print('Done exporting clip...')
+    filename = f'clip_sync_{random.randint(0,999)}.mp4'
+    print('Exporting clip...', filename)
+    ani.save(filename)
+    print('Done exporting clip...', filename)
     print('Rendering plot...')
     plt.show()
