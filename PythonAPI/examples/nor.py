@@ -911,7 +911,8 @@ class ModuleWorld(object):
             # print('Image:', image.frame_number)
 
     def dump_image(self, image, path):
-        image.save_to_disk(path, cc.Raw)
+        if image:
+            image.save_to_disk(path, cc.Raw)
         # print(f'[{filename}][{self.simulation_step}] Image saved...')
         
         # self.idx_in_seq = 0
@@ -1013,6 +1014,7 @@ class ModuleWorld(object):
 
         # GUT Initialize camera
         self.module_input.record_dataset = self.args.record_dataset
+        self.module_input.gut_autopilot = self.args.gut_autopilot
         camera_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
         camera_bp.set_attribute('image_size_x', '224')
         camera_bp.set_attribute('image_size_y', '224')
@@ -1207,16 +1209,16 @@ class ModuleWorld(object):
             # print("YAW", car_ref_yaw_diff)
             # car ---7 waypoints ---> car_to_ref_rel_angle ---7 waypoints ---> ref_to_double_ref_rel_angle
             _, car_to_ref_rel_angle = compute_magnitude_angle(ref_wp.transform.location, self.hero_transform.location, self.hero_transform.rotation.yaw)
-            try:
-                _, ref_to_double_ref_rel_angle = custom_compute_magnitude_angle(ref_to_ref_wp.transform.location, ref_wp.transform.location, ref_wp.transform.rotation.yaw)
-            except ValueError as e:
-                print(e)
-                print("Bad args")
-                print(ref_to_ref_wp.transform.location)
-                print(ref_wp.transform.location)
-                print(ref_wp.transform.rotation.yaw)
-                print("End of bad args")
-                ref_to_double_ref_rel_angle = 0
+            # try:
+            _, ref_to_double_ref_rel_angle = custom_compute_magnitude_angle(ref_to_ref_wp.transform.location, ref_wp.transform.location, ref_wp.transform.rotation.yaw)
+            # except ValueError as e:
+            #     print(e)
+            #     print("Bad args")
+            #     print(ref_to_ref_wp.transform.location)
+            #     print(ref_wp.transform.location)
+            #     print(ref_wp.transform.rotation.yaw)
+            #     print("End of bad args")
+            #     ref_to_double_ref_rel_angle = 0
 
             turn_angle_threshold = 6
             
@@ -1263,7 +1265,10 @@ class ModuleWorld(object):
                 ref_wp = self.local_plan[-2][0]
                 # print(f'current lane: {ref_wp.lane_id} | target lane {ref_to_ref_wp.lane_id}')
                 if ref_wp.lane_id != ref_to_ref_wp.lane_id:
+                    # try:
                     _, old_to_new_lane_rel_angle = custom_compute_magnitude_angle(ref_to_ref_wp.transform.location, ref_wp.transform.location, ref_wp.transform.rotation.yaw)
+                    # except ValueError:
+                    #     old_to_new_lane_rel_angle = 0
                     # print('ref 2 refref angle:', int(old_to_new_lane_rel_angle))
                     if old_to_new_lane_rel_angle <= -turn_angle_threshold:
                         command = 'get_left_lane'
@@ -1304,10 +1309,10 @@ class ModuleWorld(object):
                 best_idx = max(best_idx, len(self.local_plan) // 2 + 1)
             # print("Best idx", best_idx)
 
-            # TRASH
-            target_waypoint, _ = self.local_plan[best_idx]
-            control = self.gut_controller.run_step(target_speed, target_waypoint)
-            self.hero_actor.apply_control(control)
+            if self.module_input.gut_autopilot:
+                target_waypoint, _ = self.local_plan[best_idx]
+                control = self.gut_controller.run_step(target_speed, target_waypoint)
+                self.hero_actor.apply_control(control)
 
             # GUT Dataset recorder: image + command + spline
             if self.module_input.record_dataset:
