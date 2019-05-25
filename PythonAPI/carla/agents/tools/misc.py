@@ -99,7 +99,9 @@ def custom_compute_magnitude_angle(target_location, current_location, orientatio
     normal_vector = target_vector / norm_target
     forward_vector = np.array([math.cos(math.radians(orientation)), math.sin(math.radians(orientation))])
 
-    d_angle = math.degrees(math.acos(np.dot(forward_vector, target_vector) / norm_target))
+    something = np.dot(forward_vector, target_vector) / norm_target
+    clamped_something = min(1.0, max(-1.0, something))
+    d_angle = math.degrees(math.acos(clamped_something))
 
     rotate_right_x, rotate_right_y = rotate_point(normal_vector[0], normal_vector[1], d_angle)
     rotate_left_x, rotate_left_y = rotate_point(normal_vector[0], normal_vector[1], -d_angle)
@@ -126,7 +128,9 @@ def compute_magnitude_angle(target_location, current_location, orientation):
     norm_target = np.linalg.norm(target_vector)
 
     forward_vector = np.array([math.cos(math.radians(orientation)), math.sin(math.radians(orientation))])
-    d_angle = math.degrees(math.acos(np.dot(forward_vector, target_vector) / norm_target))
+    something = np.dot(forward_vector, target_vector) / norm_target
+    clamped_something = min(1.0, max(-1.0, something))
+    d_angle = math.degrees(math.acos(something))
 
     return (norm_target, d_angle)
 
